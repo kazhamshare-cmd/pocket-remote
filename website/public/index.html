@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PocketRemote - Control Your Mac From Your Pocket</title>
+    <meta name="description" content="PocketRemote lets you control your Mac remotely from your iPhone. Features keyboard input, mouse control, and screen sharing.">
+    <link rel="icon" type="image/png" href="/icon.png">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #ff6b6b;
+            --primary-dark: #ee5a5a;
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --text: #eee;
+            --text-muted: #aaa;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Header */
+        header {
+            padding: 20px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--primary);
+        }
+
+        /* Hero */
+        .hero {
+            text-align: center;
+            padding: 80px 20px;
+        }
+
+        .hero h1 {
+            font-size: 3rem;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, var(--primary), #ffa07a);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            max-width: 600px;
+            margin: 0 auto 40px;
+        }
+
+        /* Features */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 30px;
+            padding: 40px 0;
+        }
+
+        .feature {
+            background: var(--bg-card);
+            padding: 30px;
+            border-radius: 16px;
+            text-align: center;
+        }
+
+        .feature-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+
+        .feature h3 {
+            margin-bottom: 10px;
+        }
+
+        .feature p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        /* Download Section */
+        .download-section {
+            padding: 60px 0;
+            text-align: center;
+        }
+
+        .download-section h2 {
+            font-size: 2rem;
+            margin-bottom: 40px;
+        }
+
+        .download-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .download-card {
+            background: var(--bg-card);
+            padding: 40px 30px;
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .download-card h3 {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+        }
+
+        .download-card .platform-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        .download-card p {
+            color: var(--text-muted);
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+        }
+
+        .download-btn {
+            display: inline-block;
+            background: var(--primary);
+            color: white;
+            padding: 14px 32px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        .download-btn:hover {
+            background: var(--primary-dark);
+        }
+
+        .download-btn.appstore {
+            background: #007AFF;
+        }
+
+        .download-btn.appstore:hover {
+            background: #0056CC;
+        }
+
+        .version {
+            display: block;
+            margin-top: 15px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        /* How it works */
+        .how-it-works {
+            padding: 60px 0;
+            background: var(--bg-card);
+        }
+
+        .how-it-works h2 {
+            text-align: center;
+            font-size: 2rem;
+            margin-bottom: 40px;
+        }
+
+        .steps {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .step {
+            text-align: center;
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .step-number {
+            width: 50px;
+            height: 50px;
+            background: var(--primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin: 0 auto 15px;
+        }
+
+        .step h4 {
+            margin-bottom: 10px;
+        }
+
+        .step p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        /* Security */
+        .security {
+            padding: 60px 0;
+            text-align: center;
+        }
+
+        .security h2 {
+            font-size: 2rem;
+            margin-bottom: 20px;
+        }
+
+        .security p {
+            color: var(--text-muted);
+            max-width: 600px;
+            margin: 0 auto 30px;
+        }
+
+        .security-features {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .security-badge {
+            background: var(--bg-card);
+            padding: 15px 25px;
+            border-radius: 30px;
+            font-size: 0.9rem;
+        }
+
+        /* Footer */
+        footer {
+            padding: 40px 0;
+            text-align: center;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        footer a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2rem;
+            }
+
+            .hero p {
+                font-size: 1rem;
+            }
+
+            .download-section h2,
+            .how-it-works h2,
+            .security h2 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">PocketRemote</div>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="container">
+                <h1>Control Your Mac From Your Pocket</h1>
+                <p>PocketRemote lets you control your Mac remotely from your iPhone. Keyboard input, mouse control, and screen sharing - all from your mobile device.</p>
+            </div>
+        </section>
+
+        <section class="container">
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">⌨️</div>
+                    <h3>Keyboard Control</h3>
+                    <p>Type on your Mac using your iPhone keyboard. Perfect for presentations and remote work.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🖱️</div>
+                    <h3>Mouse Control</h3>
+                    <p>Use your iPhone as a touchpad. Click, drag, and scroll with intuitive gestures.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🖥️</div>
+                    <h3>Screen Sharing</h3>
+                    <p>View your Mac screen in real-time on your iPhone. See what you're controlling.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Remote Access</h3>
+                    <p>Connect from anywhere via secure tunnel. No port forwarding required.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="download-section">
+            <div class="container">
+                <h2>Download</h2>
+                <div class="download-cards">
+                    <div class="download-card">
+                        <div class="platform-icon">📱</div>
+                        <h3>iOS App</h3>
+                        <p>Remote control app for your iPhone</p>
+                        <a href="#" class="download-btn appstore">App Store</a>
+                        <span class="version">Coming Soon</span>
+                    </div>
+                    <div class="download-card">
+                        <div class="platform-icon">🍎</div>
+                        <h3>macOS App</h3>
+                        <p>Desktop app for your Mac (macOS 10.15+)</p>
+                        <a href="/downloads/PocketRemote-mac.dmg" class="download-btn">Download for Mac</a>
+                        <span class="version">Version 1.0.0</span>
+                    </div>
+                    <div class="download-card">
+                        <div class="platform-icon">🪟</div>
+                        <h3>Windows App</h3>
+                        <p>Desktop app for Windows 10/11</p>
+                        <a href="/downloads/PocketRemote-win.exe" class="download-btn">Download for Windows</a>
+                        <span class="version">Version 1.0.0</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="how-it-works">
+            <div class="container">
+                <h2>How It Works</h2>
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-number">1</div>
+                        <h4>Install Apps</h4>
+                        <p>Download the desktop app on your Mac and the mobile app on your iPhone.</p>
+                    </div>
+                    <div class="step">
+                        <div class="step-number">2</div>
+                        <h4>Scan QR Code</h4>
+                        <p>Open both apps and scan the QR code displayed on your Mac.</p>
+                    </div>
+                    <div class="step">
+                        <div class="step-number">3</div>
+                        <h4>Start Controlling</h4>
+                        <p>You're connected! Use your iPhone to control your Mac.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="security">
+            <div class="container">
+                <h2>Secure by Design</h2>
+                <p>Your security is our priority. PocketRemote uses end-to-end encryption and requires authentication for every connection.</p>
+                <div class="security-features">
+                    <div class="security-badge">🔐 Unique Token per Session</div>
+                    <div class="security-badge">✅ Manual Approval Required</div>
+                    <div class="security-badge">🔒 Encrypted Connection</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2024 PocketRemote. All rights reserved.</p>
+            <p style="margin-top: 10px;"><a href="mailto:support@pocketremote.app">Contact</a></p>
+        </div>
+    </footer>
+</body>
+</html>

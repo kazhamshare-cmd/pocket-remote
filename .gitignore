@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.dart_tool/
+.packages
+build/
+ios/Pods/
+ios/.symlinks/
+
+# Rust
+target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Build outputs
+dist/
+*.dmg
+*.exe
+*.msi
+*.app
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Flutter
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
