@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>PocketRemote</string>
+	<string>RemoteTouch</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>PocketRemote</string>
+	<string>RemoteTouch</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -48,9 +48,9 @@
 
 	<!-- Privacy descriptions (required for App Store) -->
 	<key>NSCameraUsageDescription</key>
-	<string>PocketRemote uses the camera to scan QR codes for connecting to your desktop computer.</string>
+	<string>RemoteTouch uses the camera to scan QR codes for connecting to your desktop computer.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>PocketRemote uses local network to communicate with the desktop app on the same Wi-Fi network.</string>
+	<string>RemoteTouch uses local network to communicate with the desktop app on the same Wi-Fi network.</string>
 
 	<!-- Bonjour services for local network discovery -->
 	<key>NSBonjourServices</key>

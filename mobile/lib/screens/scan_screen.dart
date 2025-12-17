@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../models/connection_info.dart';
 import '../services/websocket_service.dart';
+import '../services/localization_service.dart';
 
 class ScanScreen extends ConsumerStatefulWidget {
   const ScanScreen({super.key});
@@ -76,6 +77,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
   }
 
   Future<void> _processQrCode(String data) async {
+    final l10n = ref.read(l10nProvider);
     try {
       final info = ConnectionInfo.fromQrData(data);
       await ref.read(webSocketProvider.notifier).connect(info);
@@ -86,7 +88,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('無効なQRコード: $e')),
+          SnackBar(content: Text('${l10n.connectionFailed}: $e')),
         );
         _isProcessing = false;
       }
@@ -95,10 +97,11 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = ref.watch(l10nProvider);
     print('[ScanScreen] build called - _isInitialized: $_isInitialized, _cameraError: $_cameraError, cameraController: ${cameraController != null}');
     return Scaffold(
       appBar: AppBar(
-        title: const Text('QRコードをスキャン'),
+        title: Text(l10n.scanQRCode),
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
       ),
@@ -108,15 +111,15 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
           if (!_isInitialized)
             Container(
               color: Colors.black,
-              child: const Center(
+              child: Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    CircularProgressIndicator(color: Color(0xFFe94560)),
-                    SizedBox(height: 16),
+                    const CircularProgressIndicator(color: Color(0xFFe94560)),
+                    const SizedBox(height: 16),
                     Text(
-                      'カメラを起動中...',
-                      style: TextStyle(color: Colors.white54, fontSize: 16),
+                      l10n.connecting,
+                      style: const TextStyle(color: Colors.white54, fontSize: 16),
                     ),
                   ],
                 ),
@@ -125,20 +128,16 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
           else if (_cameraError)
             Container(
               color: Colors.black,
-              child: const Center(
+              child: Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.videocam_off, color: Colors.white54, size: 64),
-                    SizedBox(height: 16),
+                    const Icon(Icons.videocam_off, color: Colors.white54, size: 64),
+                    const SizedBox(height: 16),
                     Text(
-                      'カメラを使用できません',
-                      style: TextStyle(color: Colors.white54, fontSize: 16),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      '手動接続を使用してください',
-                      style: TextStyle(color: Colors.white38, fontSize: 14),
+                      l10n.cameraPermissionRequired,
+                      style: const TextStyle(color: Colors.white54, fontSize: 16),
+                      textAlign: TextAlign.center,
                     ),
                   ],
                 ),
@@ -167,7 +166,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                         const Icon(Icons.error_outline, color: Colors.red, size: 64),
                         const SizedBox(height: 16),
                         Text(
-                          'カメラエラー: ${error.errorCode}',
+                          '${l10n.connectionFailed}: ${error.errorCode}',
                           style: const TextStyle(color: Colors.white54),
                         ),
                       ],
@@ -179,10 +178,10 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
           else
             Container(
               color: Colors.black,
-              child: const Center(
+              child: Center(
                 child: Text(
-                  'カメラコントローラー初期化エラー',
-                  style: TextStyle(color: Colors.white54),
+                  l10n.connectionFailed,
+                  style: const TextStyle(color: Colors.white54),
                 ),
               ),
             ),
@@ -200,14 +199,14 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
             ),
           Positioned(
             bottom: 100,
-            left: 0,
-            right: 0,
+            left: 20,
+            right: 20,
             child: Text(
               _cameraError
-                  ? '下の「手動で接続」ボタンを押してください'
-                  : 'デスクトップアプリのQRコードを\nスキャンしてください',
+                  ? l10n.manualConnection
+                  : l10n.scanQRCode,
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 16,
                 shadows: [
@@ -230,7 +229,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                 backgroundColor: const Color(0xFFe94560),
                 padding: const EdgeInsets.symmetric(vertical: 16),
               ),
-              child: const Text('手動で接続'),
+              child: Text(l10n.manualConnection),
             ),
           ),
         ],
@@ -240,59 +239,133 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
   }
 
   void _showManualConnectDialog() {
-    final ipController = TextEditingController(text: '192.168.3.72');
+    final l10n = ref.read(l10nProvider);
+    final hostController = TextEditingController(text: '192.168.3.72');
     final portController = TextEditingController(text: '9876');
     final tokenController = TextEditingController();
+    bool isExternal = false;
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF16213e),
-        title: const Text('手動接続', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: ipController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'IPアドレス',
-                labelStyle: TextStyle(color: Colors.white54),
-              ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          backgroundColor: const Color(0xFF16213e),
+          title: Text(l10n.manualConnection, style: const TextStyle(color: Colors.white)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 接続タイプ切り替え
+                Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() {
+                          isExternal = false;
+                          hostController.text = '192.168.3.72';
+                          portController.text = '9876';
+                        }),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          decoration: BoxDecoration(
+                            color: !isExternal ? const Color(0xFFe94560) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFFe94560)),
+                          ),
+                          child: Text(
+                            l10n.localConnection,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: !isExternal ? Colors.white : Colors.white54,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() {
+                          isExternal = true;
+                          hostController.text = '';
+                          portController.text = '443';
+                        }),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          decoration: BoxDecoration(
+                            color: isExternal ? const Color(0xFFe94560) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFFe94560)),
+                          ),
+                          child: Text(
+                            l10n.externalConnection,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: isExternal ? Colors.white : Colors.white54,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: hostController,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: isExternal ? '${l10n.hostname} (xxx.trycloudflare.com)' : l10n.ipAddress,
+                    labelStyle: const TextStyle(color: Colors.white54),
+                    hintText: isExternal ? 'xxx.trycloudflare.com' : '192.168.x.x',
+                    hintStyle: const TextStyle(color: Colors.white24),
+                  ),
+                ),
+                if (!isExternal)
+                  TextField(
+                    controller: portController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: l10n.port,
+                      labelStyle: const TextStyle(color: Colors.white54),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                TextField(
+                  controller: tokenController,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: l10n.token,
+                    labelStyle: const TextStyle(color: Colors.white54),
+                  ),
+                ),
+              ],
             ),
-            TextField(
-              controller: portController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'ポート',
-                labelStyle: TextStyle(color: Colors.white54),
-              ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
             ),
-            TextField(
-              controller: tokenController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'トークン（QRから）',
-                labelStyle: TextStyle(color: Colors.white54),
-              ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                String data;
+                if (isExternal) {
+                  // 外部接続: wss://hostname:token 形式
+                  data = 'wss://${hostController.text}:${tokenController.text}';
+                } else {
+                  // ローカル接続: ip:port:token 形式
+                  data = '${hostController.text}:${portController.text}:${tokenController.text}';
+                }
+                _processQrCode(data);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFe94560)),
+              child: Text(l10n.connect),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('キャンセル', style: TextStyle(color: Colors.white54)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              final data = '${ipController.text}:${portController.text}:${tokenController.text}';
-              _processQrCode(data);
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFe94560)),
-            child: const Text('接続'),
-          ),
-        ],
       ),
     );
   }

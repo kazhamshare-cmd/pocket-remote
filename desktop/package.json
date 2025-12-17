@@ -1,7 +1,7 @@
 {
-  "name": "pocket-remote-desktop",
+  "name": "remotetouch-desktop",
   "version": "0.1.0",
-  "description": "Remote desktop control from mobile",
+  "description": "Remote desktop control from smartphone",
   "type": "module",
   "scripts": {
     "dev": "vite",

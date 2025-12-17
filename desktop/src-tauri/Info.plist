@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>PocketRemote</string>
+    <string>RemoteTouch</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
-    <string>com.pocketremote.app</string>
+    <string>com.remotetouch.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>PocketRemote</string>
+    <string>RemoteTouch</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -29,13 +29,13 @@
 
     <!-- Privacy descriptions (required for App Store) -->
     <key>NSAccessibilityUsageDescription</key>
-    <string>PocketRemote needs accessibility access to control keyboard and mouse input from your mobile device.</string>
+    <string>RemoteTouch needs accessibility access to control keyboard and mouse input from your mobile device.</string>
 
     <key>NSScreenCaptureUsageDescription</key>
-    <string>PocketRemote needs screen recording access to share your screen with your mobile device.</string>
+    <string>RemoteTouch needs screen recording access to share your screen with your mobile device.</string>
 
     <key>NSLocalNetworkUsageDescription</key>
-    <string>PocketRemote needs local network access to communicate with your mobile device on the same Wi-Fi network.</string>
+    <string>RemoteTouch needs local network access to communicate with your mobile device on the same Wi-Fi network.</string>
 
     <key>NSBonjourServices</key>
     <array>

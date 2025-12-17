@@ -469,6 +469,17 @@ impl SystemController {
             "escape" | "esc" => r#"tell application "System Events" to key code 53"#,
             "delete" | "backspace" => r#"tell application "System Events" to key code 51"#,
             "space" => r#"tell application "System Events" to keystroke space"#,
+            // 矢印キー
+            "up" => r#"tell application "System Events" to key code 126"#,
+            "down" => r#"tell application "System Events" to key code 125"#,
+            "left" => r#"tell application "System Events" to key code 123"#,
+            "right" => r#"tell application "System Events" to key code 124"#,
+            // コピー・ペースト
+            "cmd+c" => r#"tell application "System Events" to keystroke "c" using command down"#,
+            "cmd+v" => r#"tell application "System Events" to keystroke "v" using command down"#,
+            "cmd+x" => r#"tell application "System Events" to keystroke "x" using command down"#,
+            "cmd+a" => r#"tell application "System Events" to keystroke "a" using command down"#,
+            "cmd+z" => r#"tell application "System Events" to keystroke "z" using command down"#,
             _ => return false,
         };
 
@@ -654,12 +665,18 @@ impl SystemController {
         }
     }
 
-    /// 指定アプリのウィンドウを最前面に持ってきてサイズを取得
+    /// 指定アプリのウィンドウを最前面に持ってきて最大化し、サイズを取得
     pub fn focus_and_get_window(app_name: &str) -> Option<AppWindowInfo> {
         // まずアプリをフォーカス
         Self::focus_app(app_name);
 
-        // 少し待ってからウィンドウ情報を取得
+        // 少し待機
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // ウィンドウを最大化して他のアプリを隠す
+        Self::maximize_window();
+
+        // 最大化後に少し待ってからウィンドウ情報を取得
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         Self::get_frontmost_window()
@@ -667,18 +684,25 @@ impl SystemController {
 
     /// ウィンドウを最大化（フルスクリーンではなく画面いっぱいに）
     pub fn maximize_window() -> bool {
+        // メニューバーの高さは25px、Dockの高さを考慮して動的に計算
         let script = r#"
+            tell application "Finder"
+                set screenBounds to bounds of window of desktop
+                set screenWidth to item 3 of screenBounds
+                set screenHeight to item 4 of screenBounds
+            end tell
+
             tell application "System Events"
                 set frontApp to first application process whose frontmost is true
                 try
                     set frontWindow to first window of frontApp
-                    -- Option+クリックで最大化をシミュレート
                     tell frontWindow
+                        -- メニューバーの下から開始、画面いっぱいに
                         set position to {0, 25}
-                        set size to {1800, 1144}
+                        set size to {screenWidth, screenHeight - 25}
                     end tell
                     return true
-                on error
+                on error errMsg
                     return false
                 end try
             end tell

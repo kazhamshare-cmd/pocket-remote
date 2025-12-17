@@ -5,7 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 interface ConnectionInfo {
   ip: string;
   port: number;
-  token: string;
+  qr_code: string;
+  auth_token: string;
 }
 
 interface TunnelInfo {
@@ -88,9 +89,12 @@ function App() {
 
     // 接続リクエストをリッスン
     const unlistenConnectionRequest = listen<ConnectionRequest>("connection_request", (event) => {
-      console.log("Connection request:", event.payload);
+      console.log("===== CONNECTION REQUEST RECEIVED =====");
+      console.log("Event payload:", event.payload);
+      console.log("Setting pendingRequest...");
       setPendingRequest(event.payload);
     });
+    console.log("Connection request listener registered");
 
     return () => {
       unlistenTunnel.then(fn => fn());
@@ -133,10 +137,17 @@ function App() {
             setShowExternalQR(true);
           }
         }
+
+        // 保留中の接続リクエストをポーリングで取得
+        const request = await invoke<ConnectionRequest | null>("get_pending_request");
+        if (request && !pendingRequest) {
+          console.log("Pending request found:", request);
+          setPendingRequest(request);
+        }
       } catch (e) {
         console.error(e);
       }
-    }, 1000);
+    }, 500); // 500msでポーリング（より素早く検出）
 
     return () => clearInterval(interval);
   }, [accessibilityGranted, connectionInfo, tunnelStarting, tunnelInfo]);
@@ -203,7 +214,7 @@ function App() {
 
   return (
     <div className="container">
-      <h1>PocketRemote</h1>
+      <h1>RemoteTouch</h1>
 
       {/* 接続確認ダイアログ */}
       {pendingRequest && (
@@ -255,7 +266,7 @@ function App() {
             <ol>
               <li>「システム設定」→「プライバシーとセキュリティ」</li>
               <li>「アクセシビリティ」を選択</li>
-              <li>「PocketRemote」または「ターミナル」を有効にする</li>
+              <li>「RemoteTouch」または「ターミナル」を有効にする</li>
             </ol>
           </div>
         </div>
@@ -293,12 +304,24 @@ function App() {
           {!showExternalQR && (
             <>
               <div className="qr-placeholder" id="qr-code">
-                <img src={`data:image/png;base64,${connectionInfo.token}`} alt="QR Code" />
+                <img src={`data:image/png;base64,${connectionInfo.qr_code}`} alt="QR Code" />
               </div>
-              <p className="connection-url">
-                {connectionInfo.ip}:{connectionInfo.port}
-              </p>
               <p className="connection-note">同じWi-Fi/ネットワーク内で接続</p>
+              <div className="manual-connection-info">
+                <p className="manual-title">手動接続の場合:</p>
+                <div className="manual-field">
+                  <span className="field-label">IPアドレス:</span>
+                  <code className="field-value">{connectionInfo.ip}</code>
+                </div>
+                <div className="manual-field">
+                  <span className="field-label">ポート:</span>
+                  <code className="field-value">{connectionInfo.port}</code>
+                </div>
+                <div className="manual-field">
+                  <span className="field-label">トークン:</span>
+                  <code className="field-value token">{connectionInfo.auth_token}</code>
+                </div>
+              </div>
             </>
           )}
 
@@ -310,10 +333,22 @@ function App() {
                   <div className="qr-placeholder" id="qr-code">
                     <img src={`data:image/png;base64,${tunnelInfo.qr_code}`} alt="External QR Code" />
                   </div>
-                  <p className="connection-url external">
-                    {tunnelInfo.url}
-                  </p>
                   <p className="connection-note">インターネット経由で接続可能</p>
+                  <div className="manual-connection-info">
+                    <p className="manual-title">手動接続の場合:</p>
+                    <div className="manual-field">
+                      <span className="field-label">URL:</span>
+                      <code className="field-value url">{tunnelInfo.url.replace('https://', '')}</code>
+                    </div>
+                    <div className="manual-field">
+                      <span className="field-label">ポート:</span>
+                      <code className="field-value">443</code>
+                    </div>
+                    <div className="manual-field">
+                      <span className="field-label">トークン:</span>
+                      <code className="field-value token">{connectionInfo.auth_token}</code>
+                    </div>
+                  </div>
                   <button className="stop-tunnel-button" onClick={handleStopTunnel}>
                     トンネル停止
                   </button>

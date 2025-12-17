@@ -234,23 +234,32 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   Future<void> connect(ConnectionInfo info) async {
     _connectionInfo = info;
     state = state.copyWith(connectionState: WsConnectionState.connecting);
+    print('[WebSocket] Connecting to: ${info.wsUrl}');
+    print('[WebSocket] Token: ${info.token}');
+    print('[WebSocket] isExternal: ${info.isExternal}');
 
     try {
       _channel = WebSocketChannel.connect(Uri.parse(info.wsUrl));
+      print('[WebSocket] Channel created');
 
       _subscription = _channel!.stream.listen(
         _onMessage,
         onError: _onError,
         onDone: _onDone,
       );
+      print('[WebSocket] Stream listener attached');
 
-      // 認証メッセージを送信
-      _send({
+      // 認証メッセージを送信（外部接続かどうかのフラグを含む）
+      final authMsg = {
         'type': 'auth',
         'token': info.token,
         'device_name': 'Flutter App',
-      });
+        'is_external': info.isExternal,
+      };
+      print('[WebSocket] Sending auth: $authMsg');
+      _send(authMsg);
     } catch (e) {
+      print('[WebSocket] Connection error: $e');
       state = state.copyWith(
         connectionState: WsConnectionState.error,
         errorMessage: e.toString(),
@@ -514,8 +523,10 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
     // テキストメッセージ（JSON）の処理
     try {
+      print('[WebSocket] Received message: ${message.toString().substring(0, message.toString().length > 200 ? 200 : message.toString().length)}');
       final data = jsonDecode(message as String) as Map<String, dynamic>;
       final type = data['type'] as String;
+      print('[WebSocket] Message type: $type');
 
       switch (type) {
         case 'auth_response':
@@ -614,6 +625,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   }
 
   void _onError(dynamic error) {
+    print('[WebSocket] Error: $error');
     state = state.copyWith(
       connectionState: WsConnectionState.error,
       errorMessage: error.toString(),
@@ -621,6 +633,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   }
 
   void _onDone() {
+    print('[WebSocket] Connection closed (onDone)');
     state = state.copyWith(connectionState: WsConnectionState.disconnected);
   }
 }

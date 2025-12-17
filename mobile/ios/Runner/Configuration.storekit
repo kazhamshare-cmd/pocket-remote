@@ -1,0 +1,63 @@
+{
+  "identifier" : "Configuration",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_applicationInternalID" : "PocketRemote",
+    "_developerTeamID" : "FCZ9S4YW65"
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "PocketRemote",
+      "localizations" : [
+
+      ],
+      "name" : "PocketRemote",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "2.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "monthly",
+          "introductoryOffer" : {
+            "internalID" : "free_trial",
+            "numberOfPeriods" : 1,
+            "paymentMode" : "free",
+            "subscriptionPeriod" : "P3D"
+          },
+          "localizations" : [
+            {
+              "description" : "Full access to all features",
+              "displayName" : "Monthly Plan",
+              "locale" : "en_US"
+            },
+            {
+              "description" : "すべての機能にアクセス",
+              "displayName" : "月額プラン",
+              "locale" : "ja"
+            }
+          ],
+          "productID" : "b19.ikushima.pocketremote.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "monthly",
+          "subscriptionGroupID" : "PocketRemote",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

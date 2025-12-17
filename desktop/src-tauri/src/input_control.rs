@@ -4,9 +4,11 @@ use std::sync::mpsc;
 use std::thread;
 
 #[cfg(target_os = "macos")]
-use core_graphics::event::CGEvent;
+use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
 #[cfg(target_os = "macos")]
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+#[cfg(target_os = "macos")]
+use core_graphics::geometry::CGPoint;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action")]
@@ -62,33 +64,118 @@ impl InputController {
     fn handle_event_inner(enigo: &mut Enigo, event: InputEvent) -> Result<(), String> {
         match event {
             InputEvent::MouseMove { x, y } => {
-                enigo
-                    .move_mouse(x, y, Coordinate::Abs)
-                    .map_err(|e| e.to_string())?;
+                #[cfg(target_os = "macos")]
+                {
+                    // macOSではCGEventを直接使用してマウス移動
+                    // Privateを使用して他のイベントソースの状態に影響されないようにする
+                    let point = CGPoint::new(x as f64, y as f64);
+                    if let Ok(source) = CGEventSource::new(CGEventSourceStateID::Private) {
+                        if let Ok(event) = CGEvent::new_mouse_event(
+                            source,
+                            CGEventType::MouseMoved,
+                            point,
+                            CGMouseButton::Left,
+                        ) {
+                            // ボタン状態をクリア（ドラッグ状態を防ぐ）
+                            event.set_integer_value_field(
+                                core_graphics::event::EventField::MOUSE_EVENT_BUTTON_NUMBER,
+                                0
+                            );
+                            event.post(core_graphics::event::CGEventTapLocation::HID);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    enigo
+                        .move_mouse(x, y, Coordinate::Abs)
+                        .map_err(|e| e.to_string())?;
+                }
             }
             InputEvent::MouseClick { x, y, button } => {
-                enigo
-                    .move_mouse(x, y, Coordinate::Abs)
-                    .map_err(|e| e.to_string())?;
-                let btn = Self::parse_button(&button);
-                enigo.button(btn, enigo::Direction::Click)
-                    .map_err(|e| e.to_string())?;
+                #[cfg(target_os = "macos")]
+                {
+                    let point = CGPoint::new(x as f64, y as f64);
+                    let cg_button = Self::parse_cg_button(&button);
+                    let (down_type, up_type) = Self::get_click_event_types(&button);
+
+                    if let Ok(source) = CGEventSource::new(CGEventSourceStateID::Private) {
+                        // Mouse down
+                        if let Ok(down_event) = CGEvent::new_mouse_event(
+                            source.clone(),
+                            down_type,
+                            point,
+                            cg_button,
+                        ) {
+                            down_event.post(core_graphics::event::CGEventTapLocation::HID);
+                        }
+                        // Mouse up
+                        if let Ok(up_event) = CGEvent::new_mouse_event(
+                            source,
+                            up_type,
+                            point,
+                            cg_button,
+                        ) {
+                            up_event.post(core_graphics::event::CGEventTapLocation::HID);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    enigo.move_mouse(x, y, Coordinate::Abs).map_err(|e| e.to_string())?;
+                    let btn = Self::parse_button(&button);
+                    enigo.button(btn, enigo::Direction::Click).map_err(|e| e.to_string())?;
+                }
             }
             InputEvent::MouseDown { x, y, button } => {
-                enigo
-                    .move_mouse(x, y, Coordinate::Abs)
-                    .map_err(|e| e.to_string())?;
-                let btn = Self::parse_button(&button);
-                enigo.button(btn, enigo::Direction::Press)
-                    .map_err(|e| e.to_string())?;
+                #[cfg(target_os = "macos")]
+                {
+                    let point = CGPoint::new(x as f64, y as f64);
+                    let cg_button = Self::parse_cg_button(&button);
+                    let (down_type, _) = Self::get_click_event_types(&button);
+
+                    if let Ok(source) = CGEventSource::new(CGEventSourceStateID::Private) {
+                        if let Ok(event) = CGEvent::new_mouse_event(
+                            source,
+                            down_type,
+                            point,
+                            cg_button,
+                        ) {
+                            event.post(core_graphics::event::CGEventTapLocation::HID);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    enigo.move_mouse(x, y, Coordinate::Abs).map_err(|e| e.to_string())?;
+                    let btn = Self::parse_button(&button);
+                    enigo.button(btn, enigo::Direction::Press).map_err(|e| e.to_string())?;
+                }
             }
             InputEvent::MouseUp { x, y, button } => {
-                enigo
-                    .move_mouse(x, y, Coordinate::Abs)
-                    .map_err(|e| e.to_string())?;
-                let btn = Self::parse_button(&button);
-                enigo.button(btn, enigo::Direction::Release)
-                    .map_err(|e| e.to_string())?;
+                #[cfg(target_os = "macos")]
+                {
+                    let point = CGPoint::new(x as f64, y as f64);
+                    let cg_button = Self::parse_cg_button(&button);
+                    let (_, up_type) = Self::get_click_event_types(&button);
+
+                    if let Ok(source) = CGEventSource::new(CGEventSourceStateID::Private) {
+                        if let Ok(event) = CGEvent::new_mouse_event(
+                            source,
+                            up_type,
+                            point,
+                            cg_button,
+                        ) {
+                            event.post(core_graphics::event::CGEventTapLocation::HID);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    enigo.move_mouse(x, y, Coordinate::Abs).map_err(|e| e.to_string())?;
+                    let btn = Self::parse_button(&button);
+                    enigo.button(btn, enigo::Direction::Release).map_err(|e| e.to_string())?;
+                }
             }
             InputEvent::MouseScroll { delta_x, delta_y } => {
                 if delta_y != 0 {
@@ -119,6 +206,24 @@ impl InputController {
             "right" => Button::Right,
             "middle" => Button::Middle,
             _ => Button::Left,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn parse_cg_button(button: &str) -> CGMouseButton {
+        match button.to_lowercase().as_str() {
+            "right" => CGMouseButton::Right,
+            "middle" => CGMouseButton::Center,
+            _ => CGMouseButton::Left,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get_click_event_types(button: &str) -> (CGEventType, CGEventType) {
+        match button.to_lowercase().as_str() {
+            "right" => (CGEventType::RightMouseDown, CGEventType::RightMouseUp),
+            "middle" => (CGEventType::OtherMouseDown, CGEventType::OtherMouseUp),
+            _ => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp),
         }
     }
 

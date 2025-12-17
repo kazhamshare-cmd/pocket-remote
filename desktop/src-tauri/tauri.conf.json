@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PocketRemote",
+  "productName": "RemoteTouch",
   "version": "1.0.0",
-  "identifier": "com.pocketremote.app",
+  "identifier": "com.remotetouch.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "PocketRemote",
+        "title": "RemoteTouch",
         "width": 500,
         "height": 700,
         "resizable": true,
@@ -36,8 +36,8 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "Control your Mac from your smartphone",
-    "longDescription": "PocketRemote allows you to control your Mac remotely from your iPhone or Android device. Features include remote keyboard input, mouse control, and screen sharing via secure WebSocket connection.",
+    "shortDescription": "Control your PC from your smartphone",
+    "longDescription": "RemoteTouch allows you to control your PC remotely from your smartphone. Features include remote keyboard input, mouse control, and screen sharing via secure WebSocket connection.",
     "macOS": {
       "entitlements": "entitlements.plist",
       "minimumSystemVersion": "10.15",

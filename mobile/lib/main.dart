@@ -4,12 +4,33 @@ import 'package:go_router/go_router.dart';
 import 'screens/scan_screen.dart';
 import 'screens/commands_screen.dart';
 import 'screens/screen_share_screen.dart';
+import 'screens/paywall_screen.dart';
+import 'screens/splash_screen.dart';
+import 'services/subscription_service.dart';
 
 final _router = GoRouter(
-  initialLocation: '/',
+  initialLocation: '/splash',
   routes: [
     GoRoute(
+      path: '/splash',
+      builder: (context, state) {
+        print('[Router] Building SplashScreen');
+        return SplashScreen(
+          onComplete: () {
+            context.go('/');
+          },
+        );
+      },
+    ),
+    GoRoute(
       path: '/',
+      builder: (context, state) {
+        print('[Router] Building PaywallScreen');
+        return const PaywallScreen();
+      },
+    ),
+    GoRoute(
+      path: '/scan',
       builder: (context, state) {
         print('[Router] Building ScanScreen');
         return const ScanScreen();
@@ -34,6 +55,7 @@ final _router = GoRouter(
 
 void main() {
   print('[Main] App starting...');
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(
     const ProviderScope(
       child: MyApp(),
@@ -41,14 +63,14 @@ void main() {
   );
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends ConsumerWidget {
   const MyApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     print('[MyApp] build called');
     return MaterialApp.router(
-      title: 'PocketRemote',
+      title: 'RemoteTouch',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(

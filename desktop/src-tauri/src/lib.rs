@@ -26,7 +26,8 @@ use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, Termin
 pub struct ConnectionInfo {
     ip: String,
     port: u16,
-    token: String,
+    qr_code: String,
+    auth_token: String,
 }
 
 // 接続状態
@@ -57,7 +58,7 @@ pub struct ScreenInfo {
 #[serde(tag = "type")]
 enum WsMessage {
     #[serde(rename = "auth")]
-    Auth { token: String, device_name: String },
+    Auth { token: String, device_name: String, #[serde(default)] is_external: bool },
     #[serde(rename = "auth_response")]
     AuthResponse { success: bool, screen_info: Option<ScreenInfo> },
     #[serde(rename = "command_list")]
@@ -146,7 +147,7 @@ pub struct TunnelInfo {
 }
 
 // 接続リクエスト（承認待ち）
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ConnectionRequest {
     pub request_id: String,
     pub device_name: String,
@@ -170,6 +171,8 @@ pub struct AppState {
     tunnel_process: RwLock<Option<u32>>, // プロセスID
     // 接続承認用チャンネル
     pending_connections: RwLock<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    // ポーリング用: 保留中の接続リクエスト
+    pending_requests: RwLock<Vec<ConnectionRequest>>,
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +213,7 @@ impl AppState {
             tunnel_info: RwLock::new(None),
             tunnel_process: RwLock::new(None),
             pending_connections: RwLock::new(std::collections::HashMap::new()),
+            pending_requests: RwLock::new(Vec::new()),
         }
     }
 }
@@ -290,41 +294,72 @@ async fn handle_connection(
 
                 match msg {
                     Message::Text(text) => {
+                        println!("Received text message: {}", &text[..text.len().min(200)]);
                         let parsed: Result<WsMessage, _> = serde_json::from_str(&text);
 
                         match parsed {
-                            Ok(WsMessage::Auth { token, device_name }) => {
+                            Ok(WsMessage::Auth { token, device_name, is_external }) => {
                                 let token_valid = token == state.auth_token;
+                                println!("Auth request: device={}, is_external={}, token_valid={}", device_name, is_external, token_valid);
 
                                 if !token_valid {
                                     // トークンが無効な場合は即座に拒否
                                     let response = WsMessage::AuthResponse { success: false, screen_info: None };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write.lock().await.send(Message::Text(json.into())).await.ok();
+                                } else if is_external {
+                                    // 外部接続（トンネル経由）の場合は承認不要
+                                    println!("External connection - auto approving");
+                                    authenticated = true;
+                                    *state.connected_device.write() = Some(device_name.clone());
+                                    app_handle.emit("device_connected", &device_name).ok();
+
+                                    let screen_info = Some(ScreenInfo {
+                                        width: *state.screen_width.read(),
+                                        height: *state.screen_height.read(),
+                                    });
+
+                                    let response = WsMessage::AuthResponse { success: true, screen_info };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    write.lock().await.send(Message::Text(json.into())).await.ok();
+
+                                    // コマンドリストを送信
+                                    let commands = state.commands.read().clone();
+                                    let cmd_list = WsMessage::CommandList { commands };
+                                    let json = serde_json::to_string(&cmd_list).unwrap();
+                                    write.lock().await.send(Message::Text(json.into())).await.ok();
                                 } else {
-                                    // トークンが有効な場合、ユーザーに承認を求める
+                                    // ローカル接続の場合、ユーザーに承認を求める
+                                    println!("Local connection - requesting user approval");
                                     let request_id = uuid::Uuid::new_v4().to_string();
                                     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
 
                                     // 承認待ちリストに追加
                                     state.pending_connections.write().insert(request_id.clone(), tx);
 
-                                    // フロントエンドに接続リクエストを送信
+                                    // ポーリング用リストにも追加
                                     let connection_request = ConnectionRequest {
                                         request_id: request_id.clone(),
                                         device_name: device_name.clone(),
                                         ip_address: addr.ip().to_string(),
                                     };
+                                    state.pending_requests.write().push(connection_request.clone());
+                                    println!("Added to pending_requests: {:?}", connection_request);
+
+                                    // フロントエンドにもイベントを送信（バックアップ）
                                     app_handle.emit("connection_request", &connection_request).ok();
 
-                                    // タイムアウト付きで承認を待つ（30秒）
+                                    // ユーザーの承認を待つ（30秒タイムアウト）
                                     let approved = tokio::time::timeout(
                                         std::time::Duration::from_secs(30),
                                         rx
                                     ).await.unwrap_or(Ok(false)).unwrap_or(false);
+                                    println!("Connection approval result: {}", approved);
 
-                                    // タイムアウトまたは拒否された場合、pending_connectionsから削除
+                                    // 承認待ちリストから削除
                                     state.pending_connections.write().remove(&request_id);
+                                    // ポーリング用リストからも削除
+                                    state.pending_requests.write().retain(|r| r.request_id != request_id);
 
                                     if approved {
                                         authenticated = true;
@@ -651,7 +686,8 @@ async fn start_server(state: Arc<AppState>, app_handle: AppHandle) -> Result<(),
     let info = ConnectionInfo {
         ip: ip.to_string(),
         port,
-        token: qr_base64,
+        qr_code: qr_base64,
+        auth_token: state.auth_token.clone(),
     };
     *state.connection_info.write() = Some(info);
 
@@ -704,9 +740,19 @@ fn request_accessibility() -> bool {
     accessibility::request_accessibility_permission()
 }
 
+// Tauriコマンド: 保留中の接続リクエストを取得（ポーリング用）
+#[tauri::command]
+fn get_pending_request(state: tauri::State<Arc<AppState>>) -> Option<ConnectionRequest> {
+    let pending = state.pending_requests.read();
+    pending.first().cloned()
+}
+
 // Tauriコマンド: 接続リクエストを承認/拒否
 #[tauri::command]
 fn respond_to_connection(state: tauri::State<Arc<AppState>>, request_id: String, approved: bool) -> Result<(), String> {
+    // ポーリング用リストからも削除
+    state.pending_requests.write().retain(|r| r.request_id != request_id);
+
     let mut pending = state.pending_connections.write();
     if let Some(sender) = pending.remove(&request_id) {
         sender.send(approved).map_err(|_| "Failed to send response")?;
@@ -1003,6 +1049,7 @@ pub fn run() {
             check_accessibility,
             open_accessibility_settings,
             request_accessibility,
+            get_pending_request,
             respond_to_connection,
             check_cloudflared,
             get_cloudflared_status,

@@ -1,4 +1,4 @@
-package com.pocketremote.pocket_remote_mobile
+package com.remotetouch.app
 
 import io.flutter.embedding.android.FlutterActivity
 
