@@ -5,20 +5,34 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/subscription_service.dart';
 import '../services/localization_service.dart';
 
-class PaywallScreen extends ConsumerWidget {
+class PaywallScreen extends ConsumerStatefulWidget {
   const PaywallScreen({super.key});
 
   // DEBUG: Set to true to skip paywall for screenshots
   static const bool kDebugSkipPaywall = false;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PaywallScreen> createState() => _PaywallScreenState();
+}
+
+class _PaywallScreenState extends ConsumerState<PaywallScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // 画面表示時にローディング状態をリセット
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(subscriptionProvider.notifier).resetLoadingState();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final subscription = ref.watch(subscriptionProvider);
     final l10n = ref.watch(l10nProvider);
     final language = ref.watch(languageProvider);
 
     // DEBUG: Skip paywall for screenshots
-    if (kDebugSkipPaywall) {
+    if (PaywallScreen.kDebugSkipPaywall) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         context.go('/scan');
       });

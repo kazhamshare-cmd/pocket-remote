@@ -36,12 +36,32 @@ class _CommandsScreenState extends ConsumerState<CommandsScreen> {
       });
     }
 
+    final language = ref.watch(languageProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('RemoteTouch'),
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
         actions: [
+          // 言語切り替え
+          GestureDetector(
+            onTap: () {
+              ref.read(languageProvider.notifier).toggleLanguage();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF16213e),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                language == AppLanguage.ja ? '🇯🇵' : '🇺🇸',
+                style: const TextStyle(fontSize: 16),
+              ),
+            ),
+          ),
           // 更新ボタン
           IconButton(
             icon: const Icon(Icons.refresh),

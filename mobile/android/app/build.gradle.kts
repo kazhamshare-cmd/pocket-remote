@@ -17,7 +17,7 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace = "com.remotetouch.app"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "27.0.12077973"  // NDK r28 for 16KB page size support
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -31,9 +31,15 @@ android {
     defaultConfig {
         applicationId = "com.remotetouch.app"
         minSdk = 28
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     signingConfigs {

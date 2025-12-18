@@ -215,6 +215,13 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
     }
   }
 
+  // ローディング状態をリセット（画面遷移時に呼び出す）
+  void resetLoadingState() {
+    if (state.isLoading) {
+      state = state.copyWith(isLoading: false, errorMessage: null);
+    }
+  }
+
   @override
   void dispose() {
     _subscription?.cancel();

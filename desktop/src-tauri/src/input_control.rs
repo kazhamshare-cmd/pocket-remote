@@ -2,6 +2,7 @@ use enigo::{Enigo, Mouse, Keyboard, Settings, Coordinate, Button, Key};
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 use std::thread;
+use std::process::Command;
 
 #[cfg(target_os = "macos")]
 use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
@@ -194,8 +195,66 @@ impl InputController {
                 }
             }
             InputEvent::KeyType { text } => {
-                enigo.text(&text)
-                    .map_err(|e| e.to_string())?;
+                // 日本語などのUnicode文字を含む場合はクリップボード経由でペースト
+                #[cfg(target_os = "macos")]
+                {
+                    if text.chars().any(|c| !c.is_ascii()) {
+                        // クリップボードにコピー（pbcopy使用）
+                        let mut child = Command::new("pbcopy")
+                            .stdin(std::process::Stdio::piped())
+                            .spawn()
+                            .map_err(|e| format!("Failed to spawn pbcopy: {}", e))?;
+
+                        if let Some(stdin) = child.stdin.as_mut() {
+                            use std::io::Write;
+                            stdin.write_all(text.as_bytes())
+                                .map_err(|e| format!("Failed to write to pbcopy: {}", e))?;
+                        }
+                        child.wait().map_err(|e| format!("pbcopy failed: {}", e))?;
+
+                        // 少し待ってからCmd+Vでペースト
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        enigo.key(Key::Meta, enigo::Direction::Press)
+                            .map_err(|e| e.to_string())?;
+                        enigo.key(Key::Unicode('v'), enigo::Direction::Click)
+                            .map_err(|e| e.to_string())?;
+                        enigo.key(Key::Meta, enigo::Direction::Release)
+                            .map_err(|e| e.to_string())?;
+                    } else {
+                        enigo.text(&text)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    if text.chars().any(|c| !c.is_ascii()) {
+                        // Windowsではclip.exeを使用してクリップボードにコピー
+                        // PowerShellでUTF-16LEエンコーディングで書き込む
+                        let mut child = Command::new("powershell")
+                            .args(["-Command", &format!("Set-Clipboard -Value '{}'", text.replace("'", "''"))])
+                            .spawn()
+                            .map_err(|e| format!("Failed to spawn powershell: {}", e))?;
+
+                        child.wait().map_err(|e| format!("powershell failed: {}", e))?;
+
+                        // 少し待ってからCtrl+Vでペースト
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        enigo.key(Key::Control, enigo::Direction::Press)
+                            .map_err(|e| e.to_string())?;
+                        enigo.key(Key::Unicode('v'), enigo::Direction::Click)
+                            .map_err(|e| e.to_string())?;
+                        enigo.key(Key::Control, enigo::Direction::Release)
+                            .map_err(|e| e.to_string())?;
+                    } else {
+                        enigo.text(&text)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    enigo.text(&text)
+                        .map_err(|e| e.to_string())?;
+                }
             }
         }
         Ok(())

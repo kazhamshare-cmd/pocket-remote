@@ -2,6 +2,7 @@ mod screen_capture;
 mod input_control;
 mod system_control;
 mod accessibility;
+mod webrtc_screen;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
@@ -14,12 +15,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use screen_capture::ScreenCapturer;
 use input_control::{InputController, InputEvent, get_mouse_position};
-use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, TerminalTab, AppWindowInfo};
+use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, TerminalTab, AppWindowInfo, WindowListItem};
+use webrtc_screen::WebRTCScreenShare;
 
 // 接続情報
 #[derive(Clone, Serialize)]
@@ -123,6 +125,13 @@ enum WsMessage {
     TerminalTabs { tabs: Vec<TerminalTab> },
     #[serde(rename = "activate_terminal_tab")]
     ActivateTerminalTab { app_name: String, window_index: usize, tab_index: usize },
+    // アプリのウィンドウ一覧
+    #[serde(rename = "get_app_windows")]
+    GetAppWindows { app_name: String },
+    #[serde(rename = "app_windows")]
+    AppWindows { app_name: String, windows: Vec<WindowListItem> },
+    #[serde(rename = "focus_app_window")]
+    FocusAppWindow { app_name: String, window_index: usize },
     // アプリ/ウィンドウを閉じる
     #[serde(rename = "quit_app")]
     QuitApp { app_name: String },
@@ -137,6 +146,17 @@ enum WsMessage {
     FocusAndGetWindow { app_name: String },
     #[serde(rename = "maximize_window")]
     MaximizeWindow,
+    // WebRTCシグナリング
+    #[serde(rename = "webrtc_offer")]
+    WebRTCOffer { sdp: String },
+    #[serde(rename = "webrtc_answer")]
+    WebRTCAnswer { sdp: String },
+    #[serde(rename = "webrtc_ice_candidate")]
+    WebRTCIceCandidate { candidate: String },
+    #[serde(rename = "start_webrtc")]
+    StartWebRTC,
+    #[serde(rename = "stop_webrtc")]
+    StopWebRTC,
 }
 
 // トンネル情報
@@ -166,6 +186,8 @@ pub struct AppState {
     input_controller: InputController,
     // キャプチャ領域（None = 全画面）- Arc<RwLock>でスレッド間共有
     capture_region: Arc<RwLock<Option<CaptureRegion>>>,
+    // WSキャプチャ停止フラグ
+    ws_capture_running: Arc<std::sync::atomic::AtomicBool>,
     // トンネル状態
     tunnel_info: RwLock<Option<TunnelInfo>>,
     tunnel_process: RwLock<Option<u32>>, // プロセスID
@@ -210,6 +232,7 @@ impl AppState {
             frame_tx,
             input_controller: InputController::new(),
             capture_region: Arc::new(RwLock::new(None)),
+            ws_capture_running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             tunnel_info: RwLock::new(None),
             tunnel_process: RwLock::new(None),
             pending_connections: RwLock::new(std::collections::HashMap::new()),
@@ -253,6 +276,11 @@ async fn handle_connection(
     let mut screen_sharing = false;
     let mut frame_rx: Option<broadcast::Receiver<Vec<u8>>> = None;
     let mut mouse_interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    let mut last_mouse_pos: (i32, i32) = (-1, -1); // 最後に送信したマウス位置
+
+    // WebRTC状態
+    let mut webrtc_session: Option<Arc<WebRTCScreenShare>> = None;
+    let (ice_tx, mut ice_rx) = mpsc::channel::<String>(100);
 
     loop {
         tokio::select! {
@@ -272,12 +300,24 @@ async fn handle_connection(
                 }
             }
 
-            // マウス位置を定期送信
-            _ = mouse_interval.tick(), if screen_sharing && authenticated => {
-                if let Some((x, y)) = get_mouse_position() {
-                    let response = WsMessage::MousePosition { x, y };
+            // WebRTC ICE候補送信
+            ice_candidate = ice_rx.recv() => {
+                if let Some(candidate) = ice_candidate {
+                    let response = WsMessage::WebRTCIceCandidate { candidate };
                     let json = serde_json::to_string(&response).unwrap();
                     write.lock().await.send(Message::Text(json.into())).await.ok();
+                }
+            }
+
+            // マウス位置を定期送信（変化時のみ）
+            _ = mouse_interval.tick(), if screen_sharing && authenticated => {
+                if let Some((x, y)) = get_mouse_position() {
+                    if (x, y) != last_mouse_pos {
+                        last_mouse_pos = (x, y);
+                        let response = WsMessage::MousePosition { x, y };
+                        let json = serde_json::to_string(&response).unwrap();
+                        write.lock().await.send(Message::Text(json.into())).await.ok();
+                    }
                 }
             }
 
@@ -589,6 +629,28 @@ async fn handle_connection(
                                     println!("ActivateTerminalTab result: {}", success);
                                 });
                             }
+                            Ok(WsMessage::GetAppWindows { app_name }) if authenticated => {
+                                println!("GetAppWindows: {}", app_name);
+                                let name = app_name.clone();
+                                let write_clone = write.clone();
+                                tokio::spawn(async move {
+                                    let name_clone = name.clone();
+                                    let windows = tokio::task::spawn_blocking(move || {
+                                        SystemController::get_app_windows(&name_clone)
+                                    }).await.unwrap_or_default();
+                                    println!("GetAppWindows result: {} windows", windows.len());
+                                    let response = WsMessage::AppWindows { app_name: name, windows };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    write_clone.lock().await.send(Message::Text(json.into())).await.ok();
+                                });
+                            }
+                            Ok(WsMessage::FocusAppWindow { app_name, window_index }) if authenticated => {
+                                println!("FocusAppWindow: {} - window {}", app_name, window_index);
+                                tokio::task::spawn_blocking(move || {
+                                    let success = SystemController::focus_app_window(&app_name, window_index);
+                                    println!("FocusAppWindow result: {}", success);
+                                });
+                            }
                             Ok(WsMessage::QuitApp { app_name }) if authenticated => {
                                 println!("QuitApp: {}", app_name);
                                 tokio::task::spawn_blocking(move || {
@@ -636,6 +698,72 @@ async fn handle_connection(
                                     println!("MaximizeWindow result: {}", success);
                                 });
                             }
+                            // WebRTC開始
+                            Ok(WsMessage::StartWebRTC) if authenticated => {
+                                println!("[WebRTC] Starting WebRTC session...");
+                                // WSキャプチャを停止
+                                state.ws_capture_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                                // キャプチャが完全に停止するまで待機
+                                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+                                let ice_tx_clone = ice_tx.clone();
+                                let write_clone = write.clone();
+
+                                match WebRTCScreenShare::new(ice_tx_clone, state.capture_region.clone()).await {
+                                    Ok(session) => {
+                                        let session = Arc::new(session);
+                                        webrtc_session = Some(Arc::clone(&session));
+
+                                        // オファー作成
+                                        match session.create_offer().await {
+                                            Ok(sdp) => {
+                                                println!("[WebRTC] Offer created");
+                                                let response = WsMessage::WebRTCOffer { sdp };
+                                                let json = serde_json::to_string(&response).unwrap();
+                                                write_clone.lock().await.send(Message::Text(json.into())).await.ok();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[WebRTC] Failed to create offer: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[WebRTC] Failed to create session: {}", e);
+                                    }
+                                }
+                            }
+                            // WebRTCアンサー受信
+                            Ok(WsMessage::WebRTCAnswer { sdp }) if authenticated => {
+                                println!("[WebRTC] Received answer");
+                                if let Some(ref session) = webrtc_session {
+                                    if let Err(e) = session.set_answer(&sdp).await {
+                                        eprintln!("[WebRTC] Failed to set answer: {}", e);
+                                    } else {
+                                        // 接続確立後、画面キャプチャ開始
+                                        session.start_capture().await;
+                                        println!("[WebRTC] Capture started");
+                                    }
+                                }
+                            }
+                            // WebRTC ICE候補受信
+                            Ok(WsMessage::WebRTCIceCandidate { candidate }) if authenticated => {
+                                if let Some(ref session) = webrtc_session {
+                                    if let Err(e) = session.add_ice_candidate(&candidate).await {
+                                        eprintln!("[WebRTC] Failed to add ICE candidate: {}", e);
+                                    }
+                                }
+                            }
+                            // WebRTC停止
+                            Ok(WsMessage::StopWebRTC) if authenticated => {
+                                println!("[WebRTC] Stopping WebRTC session...");
+                                if let Some(session) = webrtc_session.take() {
+                                    if let Err(e) = session.close().await {
+                                        eprintln!("[WebRTC] Failed to close session: {}", e);
+                                    }
+                                }
+                                // WSキャプチャを再開
+                                state.ws_capture_running.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                             _ => {}
                         }
                     }
@@ -662,7 +790,7 @@ fn start_screen_capture(state: &Arc<AppState>) -> Result<(), String> {
     println!("Screen capture initialized: {}x{}", width, height);
 
     // キャプチャスレッドを開始（領域指定対応）
-    ScreenCapturer::start_capture(width, height, state.frame_tx.clone(), state.capture_region.clone());
+    ScreenCapturer::start_capture(width, height, state.frame_tx.clone(), state.capture_region.clone(), state.ws_capture_running.clone());
 
     Ok(())
 }

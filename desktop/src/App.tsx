@@ -27,6 +27,26 @@ interface ConnectionRequest {
   ip_address: string;
 }
 
+// 通知音を鳴らす関数
+function playNotificationSound() {
+  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const oscillator = audioContext.createOscillator();
+  const gainNode = audioContext.createGain();
+
+  oscillator.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+
+  // 2つのビープ音（ピンポン）
+  oscillator.frequency.setValueAtTime(880, audioContext.currentTime); // A5
+  oscillator.frequency.setValueAtTime(1100, audioContext.currentTime + 0.15); // C#6
+
+  gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+  gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+
+  oscillator.start(audioContext.currentTime);
+  oscillator.stop(audioContext.currentTime + 0.3);
+}
+
 function App() {
   const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
   const [connected, setConnected] = useState(false);
@@ -93,6 +113,8 @@ function App() {
       console.log("Event payload:", event.payload);
       console.log("Setting pendingRequest...");
       setPendingRequest(event.payload);
+      // 通知音を鳴らす
+      playNotificationSound();
     });
     console.log("Connection request listener registered");
 
@@ -143,6 +165,8 @@ function App() {
         if (request && !pendingRequest) {
           console.log("Pending request found:", request);
           setPendingRequest(request);
+          // 通知音を鳴らす
+          playNotificationSound();
         }
       } catch (e) {
         console.error(e);
@@ -183,7 +207,7 @@ function App() {
 
   const handleInstallCloudflared = async () => {
     setInstalling(true);
-    setInstallProgress("準備中...");
+    setInstallProgress("Preparing...");
     try {
       await invoke("install_cloudflared");
       // インストール完了後、ステータスを再チェック
@@ -192,7 +216,7 @@ function App() {
       setInstallProgress(null);
     } catch (e) {
       console.error("Failed to install cloudflared:", e);
-      setInstallProgress(`エラー: ${e}`);
+      setInstallProgress(`Error: ${e}`);
     } finally {
       setInstalling(false);
     }
@@ -216,57 +240,57 @@ function App() {
     <div className="container">
       <h1>RemoteTouch</h1>
 
-      {/* 接続確認ダイアログ */}
+      {/* 接続確認ダイアログ / Connection Dialog */}
       {pendingRequest && (
         <div className="connection-dialog-overlay">
           <div className="connection-dialog">
             <div className="dialog-icon">📱</div>
-            <h3>接続リクエスト</h3>
+            <h3>Connection Request</h3>
             <p className="device-name">{pendingRequest.device_name}</p>
             <p className="device-ip">IP: {pendingRequest.ip_address}</p>
-            <p className="dialog-message">このデバイスからの接続を許可しますか？</p>
+            <p className="dialog-message">Allow connection from this device?</p>
             <div className="dialog-buttons">
               <button
                 className="approve-button"
                 onClick={() => handleConnectionResponse(true)}
               >
-                ✓ 許可
+                ✓ Allow
               </button>
               <button
                 className="deny-button"
                 onClick={() => handleConnectionResponse(false)}
               >
-                ✕ 拒否
+                ✕ Deny
               </button>
             </div>
-            <p className="dialog-timeout">30秒後に自動的に拒否されます</p>
+            <p className="dialog-timeout">Auto-denied after 30 seconds</p>
           </div>
         </div>
       )}
 
-      {/* アクセシビリティ権限の警告 */}
+      {/* アクセシビリティ権限の警告 / Accessibility Permission Warning */}
       {!checkingPermission && accessibilityGranted === false && (
         <div className="permission-warning">
           <div className="warning-icon">⚠️</div>
-          <h3>アクセシビリティ権限が必要です</h3>
+          <h3>Accessibility Permission Required</h3>
           <p>
-            キーボード入力やマウス操作を行うには、アクセシビリティ権限が必要です。
-            システム設定から許可してください。
+            Keyboard and mouse control requires accessibility permission.
+            Please enable it in System Settings.
           </p>
           <div className="permission-buttons">
             <button className="primary-button" onClick={handleOpenSettings}>
-              システム設定を開く
+              Open System Settings
             </button>
             <button className="secondary-button" onClick={handleRetryPermission}>
-              再チェック
+              Recheck
             </button>
           </div>
           <div className="permission-steps">
-            <p><strong>手順:</strong></p>
+            <p><strong>Steps:</strong></p>
             <ol>
-              <li>「システム設定」→「プライバシーとセキュリティ」</li>
-              <li>「アクセシビリティ」を選択</li>
-              <li>「RemoteTouch」または「ターミナル」を有効にする</li>
+              <li>System Settings → Privacy & Security</li>
+              <li>Select "Accessibility"</li>
+              <li>Enable "RemoteTouch" or "Terminal"</li>
             </ol>
           </div>
         </div>
@@ -274,58 +298,58 @@ function App() {
 
       <div className="status-card">
         <div className={`status-indicator ${connected ? "connected" : "waiting"}`} />
-        <span>{connected ? `接続中: ${connectedDevice}` : "接続待機中..."}</span>
+        <span>{connected ? `Connected: ${connectedDevice}` : "Waiting for connection..."}</span>
         {accessibilityGranted && (
-          <span className="permission-badge granted">✓ 権限OK</span>
+          <span className="permission-badge granted">✓ Permission OK</span>
         )}
       </div>
 
       {connectionInfo && (
         <div className="qr-section">
-          <h2>QRコードをスキャンして接続</h2>
+          <h2>Scan QR Code to Connect</h2>
 
-          {/* ローカル/外部切り替えタブ */}
+          {/* ローカル/外部切り替えタブ / Local/External Tabs */}
           <div className="connection-tabs">
             <button
               className={`tab-button ${!showExternalQR ? 'active' : ''}`}
               onClick={() => setShowExternalQR(false)}
             >
-              🏠 ローカル
+              🏠 Local
             </button>
             <button
               className={`tab-button ${showExternalQR ? 'active' : ''}`}
               onClick={() => setShowExternalQR(true)}
             >
-              🌐 外部接続
+              🌐 External
             </button>
           </div>
 
-          {/* ローカル接続QR */}
+          {/* ローカル接続QR / Local Connection QR */}
           {!showExternalQR && (
             <>
               <div className="qr-placeholder" id="qr-code">
                 <img src={`data:image/png;base64,${connectionInfo.qr_code}`} alt="QR Code" />
               </div>
-              <p className="connection-note">同じWi-Fi/ネットワーク内で接続</p>
+              <p className="connection-note">Connect within same WiFi/network</p>
               <div className="manual-connection-info">
-                <p className="manual-title">手動接続の場合:</p>
+                <p className="manual-title">Manual Connection:</p>
                 <div className="manual-field">
-                  <span className="field-label">IPアドレス:</span>
+                  <span className="field-label">IP Address:</span>
                   <code className="field-value">{connectionInfo.ip}</code>
                 </div>
                 <div className="manual-field">
-                  <span className="field-label">ポート:</span>
+                  <span className="field-label">Port:</span>
                   <code className="field-value">{connectionInfo.port}</code>
                 </div>
                 <div className="manual-field">
-                  <span className="field-label">トークン:</span>
+                  <span className="field-label">Token:</span>
                   <code className="field-value token">{connectionInfo.auth_token}</code>
                 </div>
               </div>
             </>
           )}
 
-          {/* 外部接続QR */}
+          {/* 外部接続QR / External Connection QR */}
           {showExternalQR && (
             <>
               {tunnelInfo ? (
@@ -333,30 +357,30 @@ function App() {
                   <div className="qr-placeholder" id="qr-code">
                     <img src={`data:image/png;base64,${tunnelInfo.qr_code}`} alt="External QR Code" />
                   </div>
-                  <p className="connection-note">インターネット経由で接続可能</p>
+                  <p className="connection-note">Connect via internet</p>
                   <div className="manual-connection-info">
-                    <p className="manual-title">手動接続の場合:</p>
+                    <p className="manual-title">Manual Connection:</p>
                     <div className="manual-field">
                       <span className="field-label">URL:</span>
                       <code className="field-value url">{tunnelInfo.url.replace('https://', '')}</code>
                     </div>
                     <div className="manual-field">
-                      <span className="field-label">ポート:</span>
+                      <span className="field-label">Port:</span>
                       <code className="field-value">443</code>
                     </div>
                     <div className="manual-field">
-                      <span className="field-label">トークン:</span>
+                      <span className="field-label">Token:</span>
                       <code className="field-value token">{connectionInfo.auth_token}</code>
                     </div>
                   </div>
                   <button className="stop-tunnel-button" onClick={handleStopTunnel}>
-                    トンネル停止
+                    Stop Tunnel
                   </button>
                 </>
               ) : tunnelStarting ? (
                 <div className="tunnel-loading">
                   <div className="spinner"></div>
-                  <p>トンネルを開始中...</p>
+                  <p>Starting tunnel...</p>
                 </div>
               ) : (
                 <div className="tunnel-setup">
@@ -364,24 +388,24 @@ function App() {
                     installing ? (
                       <div className="install-progress">
                         <div className="spinner"></div>
-                        <p>{installProgress || "インストール中..."}</p>
+                        <p>{installProgress || "Installing..."}</p>
                       </div>
                     ) : (
                       <>
-                        <p className="warning-text">cloudflaredがインストールされていません</p>
+                        <p className="warning-text">cloudflared is not installed</p>
                         <button className="start-tunnel-button" onClick={handleInstallCloudflared}>
-                          📥 自動インストール
+                          📥 Auto Install
                         </button>
                         <p className="install-guide">
-                          または手動: <code>brew install cloudflared</code>
+                          Or manual: <code>brew install cloudflared</code>
                         </p>
                       </>
                     )
                   ) : (
                     <>
-                      <p>外部ネットワークからの接続を有効にします</p>
+                      <p>Enable connection from external network</p>
                       <button className="start-tunnel-button" onClick={handleStartTunnel}>
-                        🚀 トンネル開始
+                        🚀 Start Tunnel
                       </button>
                     </>
                   )}
@@ -393,9 +417,9 @@ function App() {
       )}
 
       <div className="commands-section">
-        <h2>接続情報</h2>
+        <h2>Connection Info</h2>
         <div className="command-list">
-          <p className="empty-message">モバイルアプリでQRコードをスキャンして接続してください</p>
+          <p className="empty-message">Scan QR code with mobile app to connect</p>
         </div>
       </div>
     </div>

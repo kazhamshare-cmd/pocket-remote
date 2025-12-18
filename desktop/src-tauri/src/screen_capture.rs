@@ -48,23 +48,32 @@ impl ScreenCapturer {
         _height: usize,
         tx: broadcast::Sender<Vec<u8>>,
         capture_region: Arc<RwLock<Option<CaptureRegion>>>,
+        ws_capture_running: Arc<std::sync::atomic::AtomicBool>,
     ) {
         std::thread::spawn(move || {
-            let display = match Display::primary() {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Failed to get display: {}", e);
-                    return;
+            loop {
+                // WSキャプチャが有効になるまで待機
+                while !ws_capture_running.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-            };
 
-            let mut capturer = match Capturer::new(display) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Failed to create capturer: {}", e);
-                    return;
-                }
-            };
+                let display = match Display::primary() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Failed to get display: {}", e);
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
+
+                let mut capturer = match Capturer::new(display) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Failed to create capturer: {}", e);
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
 
             let width = capturer.width();
             let height = capturer.height();
@@ -75,7 +84,8 @@ impl ScreenCapturer {
             let mut frame_count: u64 = 0;
             let mut logged_info = false;
 
-            loop {
+            // 内側のキャプチャループ
+            while ws_capture_running.load(std::sync::atomic::Ordering::SeqCst) {
                 match capturer.frame() {
                     Ok(frame) => {
                         let row_bytes = width * bytes_per_pixel;
@@ -118,7 +128,7 @@ impl ScreenCapturer {
                                 let region = capture_region.read().clone();
 
                                 let (final_img, quality) = if let Some(r) = region {
-                                    // 領域指定あり: その領域だけをクロップして高品質で送信
+                                    // 領域指定あり: その領域だけをクロップして3倍に拡大、超高品質で送信
                                     let crop_x = (r.x as u32).min(width as u32);
                                     let crop_y = (r.y as u32).min(height as u32);
                                     let crop_w = (r.width as u32).min(width as u32 - crop_x);
@@ -126,8 +136,13 @@ impl ScreenCapturer {
 
                                     if crop_w > 0 && crop_h > 0 {
                                         let cropped = dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h);
-                                        // 高解像度モード: 縮小しない、高品質
-                                        (cropped, 75u8)
+                                        // 3倍に拡大して見やすくする
+                                        let enlarged = cropped.resize_exact(
+                                            crop_w * 3,
+                                            crop_h * 3,
+                                            image::imageops::FilterType::Triangle,
+                                        );
+                                        (enlarged, 85u8)
                                     } else {
                                         // 無効な領域の場合は全画面
                                         let new_width = (width / 2) as u32;
@@ -135,20 +150,20 @@ impl ScreenCapturer {
                                         let resized = dynamic_img.resize_exact(
                                             new_width,
                                             new_height,
-                                            image::imageops::FilterType::Nearest,
+                                            image::imageops::FilterType::Triangle,
                                         );
-                                        (resized, 60u8)
+                                        (resized, 70u8)
                                     }
                                 } else {
-                                    // 領域指定なし: 全画面を1/2に縮小
-                                    let new_width = (width / 2) as u32;
-                                    let new_height = (height / 2) as u32;
+                                    // 領域指定なし: 全画面を2/3サイズで高画質送信（WSモードの利点）
+                                    let new_width = (width * 2 / 3) as u32;
+                                    let new_height = (height * 2 / 3) as u32;
                                     let resized = dynamic_img.resize_exact(
                                         new_width,
                                         new_height,
-                                        image::imageops::FilterType::Nearest,
+                                        image::imageops::FilterType::Triangle,
                                     );
-                                    (resized, 60u8)
+                                    (resized, 80u8) // WSは高品質
                                 };
 
                                 // JPEG品質を設定
@@ -191,9 +206,15 @@ impl ScreenCapturer {
                     }
                 }
 
-                // 約20fps
-                std::thread::sleep(Duration::from_millis(50));
+                // 約30fps（高速化）
+                std::thread::sleep(Duration::from_millis(33));
             }
+
+            // 内側ループを抜けた（ws_capture_runningがfalseになった）
+            // Capturerを解放して、外側ループに戻る
+            drop(capturer);
+            println!("[WS] Capturer released, waiting for restart...");
+            } // 外側のloop終了
         });
     }
 }

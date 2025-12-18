@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,13 +28,18 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   bool _autoEnter = false; // 送信後にEnterを押すか
   bool _dragMode = false; // ドラッグモード（false: タップで移動、true: ドラッグ操作）
   DateTime? _lastTapTime; // ダブルタップ検出用
+  bool _realtimeSync = false; // リアルタイム同期モード（日本語対応のためデフォルトオフ）
+  Timer? _debounceTimer; // IME入力用debounceタイマー
+  String _pendingText = ''; // debounce中の保留テキスト
+  String _lastSentText = ''; // 最後に送信したテキスト
+  bool _useWebRTC = true; // WebRTCモード（常にWebRTC使用）
 
   @override
   void initState() {
     super.initState();
     // 画面共有開始 & アプリ一覧取得
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(webSocketProvider.notifier).startScreenShare();
+      _startScreenShare();
       ref.read(webSocketProvider.notifier).getRunningApps();
     });
     // 縦向き固定（パン・ズームで操作）
@@ -44,9 +50,29 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   }
 
+  void _startScreenShare() {
+    if (_useWebRTC) {
+      // WebRTCモード（高速）
+      ref.read(webSocketProvider.notifier).startWebRTCScreenShare();
+    } else {
+      // 従来のWebSocketモード
+      ref.read(webSocketProvider.notifier).startScreenShare();
+    }
+  }
+
+  void _stopScreenShare() {
+    final state = ref.read(webSocketProvider);
+    if (state.isWebRTCActive) {
+      ref.read(webSocketProvider.notifier).stopWebRTCScreenShare();
+    } else {
+      ref.read(webSocketProvider.notifier).stopScreenShare();
+    }
+  }
+
   @override
   void dispose() {
-    ref.read(webSocketProvider.notifier).stopScreenShare();
+    _debounceTimer?.cancel();
+    _stopScreenShare();
     // 向きを元に戻す
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -588,19 +614,19 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                             IconButton(
                               icon: const Icon(Icons.arrow_back, color: Colors.white),
                               onPressed: () {
-                                ref.read(webSocketProvider.notifier).stopScreenShare();
+                                _stopScreenShare();
                                 context.go('/commands');
                               },
                             ),
-                            // ステータス & モードインジケーター
+                            // ステータスインジケーター
                             Row(
                               children: [
                                 // 接続状態
                                 Container(
                                   width: 8,
                                   height: 8,
-                                  decoration: const BoxDecoration(
-                                    color: Colors.green,
+                                  decoration: BoxDecoration(
+                                    color: state.currentFrame != null ? Colors.green : Colors.orange,
                                     shape: BoxShape.circle,
                                   ),
                                 ),
@@ -831,7 +857,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 送信先表示と閉じるボタン
+          // 送信先表示とモード切り替え
           Row(
             children: [
               const Icon(Icons.send, color: Color(0xFFe94560), size: 14),
@@ -847,6 +873,45 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              // リアルタイム同期切り替え
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _realtimeSync = !_realtimeSync;
+                    if (!_realtimeSync) {
+                      _lastSentText = '';
+                    }
+                  });
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _realtimeSync
+                        ? Colors.green.withOpacity(0.3)
+                        : Colors.white.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _realtimeSync ? Icons.sync : Icons.sync_disabled,
+                        color: _realtimeSync ? Colors.green : Colors.white54,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _realtimeSync ? 'リアルタイム' : '手動送信',
+                        style: TextStyle(
+                          color: _realtimeSync ? Colors.green : Colors.white54,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               // 自動Enter切り替え
               GestureDetector(
                 onTap: () {
@@ -887,6 +952,8 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 onTap: () {
                   setState(() {
                     _showKeyboardInput = false;
+                    _textController.clear();
+                    _lastSentText = '';
                   });
                 },
                 child: const Icon(Icons.close, color: Colors.white54, size: 20),
@@ -901,36 +968,66 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 child: TextField(
                   controller: _textController,
                   focusNode: _textFocusNode,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
                   decoration: InputDecoration(
-                    hintText: '入力...',
+                    hintText: _realtimeSync ? '入力するとリアルタイムで反映...' : '入力...',
                     hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
                     filled: true,
                     fillColor: const Color(0xFF1a1a2e),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: BorderSide.none,
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: Color(0xFFe94560)),
+                      borderSide: BorderSide(
+                        color: _realtimeSync ? Colors.green : const Color(0xFFe94560),
+                        width: 2,
+                      ),
                     ),
                   ),
-                  onSubmitted: (text) => _sendText(),
+                  onChanged: _realtimeSync ? _onTextChanged : null,
+                  onSubmitted: (text) {
+                    if (_autoEnter) {
+                      ref.read(webSocketProvider.notifier).pressKey('enter');
+                    }
+                    if (!_realtimeSync) {
+                      _sendText();
+                    }
+                    // フィールドをクリアして次の入力に備える
+                    _textController.clear();
+                    _lastSentText = '';
+                    _textFocusNode.requestFocus();
+                  },
                 ),
               ),
               const SizedBox(width: 8),
-              // 送信ボタン
+              // 送信ボタン（リアルタイムモードではEnter送信）
               GestureDetector(
-                onTap: _sendText,
+                onTap: () {
+                  if (_realtimeSync) {
+                    // リアルタイムモード: Enterを送信してクリア
+                    ref.read(webSocketProvider.notifier).pressKey('enter');
+                    _textController.clear();
+                    _lastSentText = '';
+                  } else {
+                    // 手動モード: テキストを送信
+                    _sendText();
+                  }
+                  _textFocusNode.requestFocus();
+                },
                 child: Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFe94560),
+                    color: _realtimeSync ? Colors.green : const Color(0xFFe94560),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Icon(Icons.send, color: Colors.white, size: 20),
+                  child: Icon(
+                    _realtimeSync ? Icons.keyboard_return : Icons.send,
+                    color: Colors.white,
+                    size: 20,
+                  ),
                 ),
               ),
             ],
@@ -948,6 +1045,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 _compactKeyButton('↓', 'down'),
                 _compactKeyButton('←', 'left'),
                 _compactKeyButton('→', 'right'),
+                _compactKeyButton('⌫', 'backspace'),
                 _compactKeyButton('Del', 'delete'),
                 _compactKeyButton('⌘A', 'cmd+a'),
                 _compactKeyButton('⌘C', 'cmd+c'),
@@ -962,6 +1060,35 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     );
   }
 
+  // リアルタイムテキスト同期（ASCII文字のみ対応）
+  void _onTextChanged(String newText) {
+    // リアルタイム同期が無効の場合は何もしない
+    // 送信ボタンで一括送信する
+    if (!_realtimeSync) {
+      return;
+    }
+
+    // 非ASCII文字（日本語など）が含まれる場合はリアルタイム同期しない
+    final hasNonAscii = newText.runes.any((r) => r > 127);
+    if (hasNonAscii) {
+      _pendingText = newText;
+      return; // 送信しない
+    }
+
+    // ASCII入力のみ: 即座に送信
+    if (newText.length > _lastSentText.length) {
+      final addedText = newText.substring(_lastSentText.length);
+      ref.read(webSocketProvider.notifier).typeText(addedText);
+    } else if (newText.length < _lastSentText.length) {
+      final deleteCount = _lastSentText.length - newText.length;
+      for (var i = 0; i < deleteCount; i++) {
+        ref.read(webSocketProvider.notifier).pressKey('backspace');
+      }
+    }
+    _lastSentText = newText;
+    _pendingText = newText;
+  }
+
   void _sendText() {
     final text = _textController.text;
     if (text.isNotEmpty) {
@@ -971,6 +1098,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         ref.read(webSocketProvider.notifier).typeText(text);
       }
       _textController.clear();
+      // 状態をリセット
+      _lastSentText = '';
+      _pendingText = '';
     }
     // フォーカスを維持
     _textFocusNode.requestFocus();
@@ -1161,20 +1291,8 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       ),
                       onTap: () {
                         Navigator.pop(context);
-                        // アプリを選択したら自動的にズーム
-                        _zoomToApp(app.name, screenSize, screenInfo);
-                        // ブラウザの場合はタブ一覧を表示
-                        if (isBrowser) {
-                          Future.delayed(const Duration(milliseconds: 600), () {
-                            _showBrowserTabsSheet(app.name);
-                          });
-                        }
-                        // Terminalの場合はタブ一覧を表示
-                        if (isTerminal) {
-                          Future.delayed(const Duration(milliseconds: 600), () {
-                            _showTerminalTabsSheet(app.name);
-                          });
-                        }
+                        // まずウィンドウ一覧を取得して表示
+                        _showAppWindowsSheet(app.name, screenSize, screenInfo, isBrowser, isTerminal);
                       },
                     );
                   },
@@ -1186,18 +1304,152 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     );
   }
 
+  // アプリのウィンドウ一覧を表示
+  void _showAppWindowsSheet(String appName, Size screenSize, ScreenInfo? screenInfo, bool isBrowser, bool isTerminal) {
+    // ウィンドウ一覧を取得
+    ref.read(webSocketProvider.notifier).getAppWindows(appName);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF16213e),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.4,
+        minChildSize: 0.2,
+        maxChildSize: 0.7,
+        expand: false,
+        builder: (context, scrollController) => Consumer(
+          builder: (context, ref, _) {
+            final state = ref.watch(webSocketProvider);
+            return Container(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.window, color: Colors.white),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '$appName のウィンドウ',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.refresh, color: Colors.white54),
+                        onPressed: () {
+                          ref.read(webSocketProvider.notifier).getAppWindows(appName);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'ウィンドウを選択してください',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                  const SizedBox(height: 16),
+                  if (state.appWindows.isEmpty)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Text(
+                          'ウィンドウを取得中...',
+                          style: TextStyle(color: Colors.white54),
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: ListView.builder(
+                        controller: scrollController,
+                        itemCount: state.appWindows.length,
+                        itemBuilder: (context, index) {
+                          final window = state.appWindows[index];
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: window.isMinimized
+                                  ? Colors.grey.withOpacity(0.3)
+                                  : const Color(0xFF1a1a2e),
+                              radius: 16,
+                              child: Text(
+                                '${window.index}',
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            title: Text(
+                              window.title.isEmpty ? '(タイトルなし)' : window.title,
+                              style: const TextStyle(color: Colors.white),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: window.isMinimized
+                                ? const Text(
+                                    '最小化中',
+                                    style: TextStyle(color: Colors.orange, fontSize: 11),
+                                  )
+                                : null,
+                            trailing: const Icon(
+                              Icons.arrow_forward_ios,
+                              color: Colors.white38,
+                              size: 16,
+                            ),
+                            onTap: () {
+                              Navigator.pop(context);
+                              // 選択したウィンドウをフォーカス
+                              ref.read(webSocketProvider.notifier).focusAppWindow(appName, window.index);
+                              // その後ズーム
+                              Future.delayed(const Duration(milliseconds: 300), () {
+                                _zoomToApp(appName, screenSize, screenInfo);
+                              });
+                              // ブラウザの場合のみタブ一覧を表示（ターミナルは不要）
+                              if (isBrowser) {
+                                Future.delayed(const Duration(milliseconds: 800), () {
+                                  _showBrowserTabsSheet(appName);
+                                });
+                              }
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   // アプリにズーム（ウィンドウ情報を取得してからズーム）
   void _zoomToApp(String appName, Size screenSize, ScreenInfo? screenInfo) async {
     // アプリをフォーカスしてウィンドウ情報を取得
     ref.read(webSocketProvider.notifier).focusAndGetWindow(appName);
 
-    // ウィンドウ情報が届くのを待つ
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    final state = ref.read(webSocketProvider);
-    if (state.windowInfo != null) {
-      _zoomToWindow(state.windowInfo!, screenSize, screenInfo);
+    // ウィンドウ情報が届くのを待つ（最大2秒、100ms間隔でチェック）
+    for (var i = 0; i < 20; i++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      final state = ref.read(webSocketProvider);
+      if (state.windowInfo != null) {
+        print('[ZoomToApp] WindowInfo received: ${state.windowInfo!.x}, ${state.windowInfo!.y}, ${state.windowInfo!.width}x${state.windowInfo!.height}');
+        _zoomToWindow(state.windowInfo!, screenSize, screenInfo);
+        return;
+      }
     }
+    print('[ZoomToApp] WindowInfo not received within timeout');
   }
 
   void _showBrowserTabsSheet(String appName) {

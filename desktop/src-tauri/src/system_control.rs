@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningApp {
     pub name: String,
@@ -43,10 +49,19 @@ pub struct AppWindowInfo {
     pub height: i32,
 }
 
+/// アプリのウィンドウ一覧用
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowListItem {
+    pub index: usize,
+    pub title: String,
+    pub is_minimized: bool,
+}
+
 pub struct SystemController;
 
 impl SystemController {
     /// 起動中のアプリケーション一覧を取得（高速版）
+    #[cfg(target_os = "macos")]
     pub fn get_running_apps() -> Vec<RunningApp> {
         // 高速化: 一括取得でループを避ける、明示的なデリミタを使用
         let script = r#"
@@ -94,7 +109,51 @@ impl SystemController {
         Vec::new()
     }
 
-    /// アプリをフォーカス（アクティブに）
+    /// 起動中のアプリケーション一覧を取得（Windows版）
+    #[cfg(target_os = "windows")]
+    pub fn get_running_apps() -> Vec<RunningApp> {
+        // PowerShellでウィンドウを持つプロセス一覧を取得
+        let script = r#"
+            $foreground = (Get-Process | Where-Object {$_.MainWindowHandle -eq (Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();' -Name 'Win32' -Namespace 'Native' -PassThru)::GetForegroundWindow()}).ProcessName
+            Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | ForEach-Object {
+                $name = $_.ProcessName
+                $isActive = if ($name -eq $foreground) {'true'} else {'false'}
+                "$name|||$isActive"
+            }
+        "#;
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        match cmd.output() {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout
+                    .lines()
+                    .filter_map(|line| {
+                        let parts: Vec<&str> = line.split("|||").collect();
+                        if parts.len() >= 2 {
+                            Some(RunningApp {
+                                name: parts[0].to_string(),
+                                bundle_id: None,
+                                is_active: parts[1] == "true",
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                eprintln!("Failed to get running apps: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// アプリをフォーカス（アクティブに）- macOS版
+    #[cfg(target_os = "macos")]
     pub fn focus_app(app_name: &str) -> bool {
         let script = format!(
             r#"tell application "{}" to activate"#,
@@ -109,7 +168,198 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// アプリを終了する
+    /// アプリをフォーカス（アクティブに）- Windows版
+    #[cfg(target_os = "windows")]
+    pub fn focus_app(app_name: &str) -> bool {
+        let script = format!(
+            r#"
+            $proc = Get-Process -Name '{}' -ErrorAction SilentlyContinue | Where-Object {{$_.MainWindowHandle -ne 0}} | Select-Object -First 1
+            if ($proc) {{
+                Add-Type -TypeDefinition @'
+                using System;
+                using System.Runtime.InteropServices;
+                public class Win32 {{
+                    [DllImport("user32.dll")]
+                    public static extern bool SetForegroundWindow(IntPtr hWnd);
+                    [DllImport("user32.dll")]
+                    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+                }}
+'@
+                [Win32]::ShowWindow($proc.MainWindowHandle, 9)
+                [Win32]::SetForegroundWindow($proc.MainWindowHandle)
+            }}
+            "#,
+            app_name.replace("'", "''")
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// アプリのウィンドウ一覧を取得 - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_app_windows(app_name: &str) -> Vec<WindowListItem> {
+        let escaped_name = app_name.replace("\"", "\\\"");
+
+        // System Eventsを使用してウィンドウ一覧を取得
+        let script = format!(
+            r#"
+            tell application "System Events"
+                tell process "{}"
+                    set windowList to {{}}
+                    set windowCount to count of windows
+                    repeat with i from 1 to windowCount
+                        set w to window i
+                        set wTitle to ""
+                        set wMinimized to false
+                        try
+                            set wTitle to name of w
+                        end try
+                        try
+                            set wMinimized to value of attribute "AXMinimized" of w
+                        end try
+                        set end of windowList to (i as text) & ":::" & wTitle & ":::" & (wMinimized as text)
+                    end repeat
+                    set AppleScript's text item delimiters to "|||"
+                    set windowListText to windowList as text
+                    set AppleScript's text item delimiters to ""
+                    return windowListText
+                end tell
+            end tell
+            "#,
+            escaped_name
+        );
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if stdout.is_empty() {
+                    return Vec::new();
+                }
+
+                stdout
+                    .split("|||")
+                    .filter_map(|entry| {
+                        let parts: Vec<&str> = entry.splitn(3, ":::").collect();
+                        if parts.len() >= 2 {
+                            let index = parts[0].parse::<usize>().unwrap_or(1);
+                            let title = parts[1].to_string();
+                            let is_minimized = parts.get(2).map(|s| *s == "true").unwrap_or(false);
+                            Some(WindowListItem {
+                                index,
+                                title,
+                                is_minimized,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                eprintln!("Failed to get windows for {}: {}", app_name, e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// アプリのウィンドウ一覧を取得 - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn get_app_windows(app_name: &str) -> Vec<WindowListItem> {
+        // Windowsではプロセスごとにメインウィンドウタイトルを取得
+        let script = format!(
+            r#"
+            $index = 1
+            Get-Process -Name '{}' -ErrorAction SilentlyContinue | Where-Object {{$_.MainWindowTitle -ne ''}} | ForEach-Object {{
+                $title = $_.MainWindowTitle
+                "$index:::$title:::false"
+                $index++
+            }}
+            "#,
+            app_name.replace("'", "''")
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        match cmd.output() {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout
+                    .lines()
+                    .filter_map(|line| {
+                        let parts: Vec<&str> = line.splitn(3, ":::").collect();
+                        if parts.len() >= 2 {
+                            let index = parts[0].parse::<usize>().unwrap_or(1);
+                            let title = parts[1].to_string();
+                            let is_minimized = parts.get(2).map(|s| *s == "true").unwrap_or(false);
+                            Some(WindowListItem {
+                                index,
+                                title,
+                                is_minimized,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                eprintln!("Failed to get windows for {}: {}", app_name, e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// 特定のウィンドウをフォーカス（インデックス指定）- macOS版
+    #[cfg(target_os = "macos")]
+    pub fn focus_app_window(app_name: &str, window_index: usize) -> bool {
+        let escaped_name = app_name.replace("\"", "\\\"");
+
+        // アプリをアクティブにして、指定ウィンドウを最前面に
+        let script = format!(
+            r#"
+            tell application "{}"
+                activate
+            end tell
+            tell application "System Events"
+                tell process "{}"
+                    try
+                        set targetWindow to window {}
+                        perform action "AXRaise" of targetWindow
+                        set frontmost to true
+                    end try
+                end tell
+            end tell
+            "#,
+            escaped_name, escaped_name, window_index
+        );
+
+        Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// 特定のウィンドウをフォーカス（インデックス指定）- Windows版
+    #[cfg(target_os = "windows")]
+    pub fn focus_app_window(app_name: &str, _window_index: usize) -> bool {
+        // Windowsでは単にアプリをフォーカス（複数ウィンドウの選択は簡略化）
+        Self::focus_app(app_name)
+    }
+
+    /// アプリを終了する - macOS版
+    #[cfg(target_os = "macos")]
     pub fn quit_app(app_name: &str) -> bool {
         let script = format!(
             r#"tell application "{}" to quit"#,
@@ -124,7 +374,17 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// 現在のウィンドウ/タブを閉じる（Cmd+W）
+    /// アプリを終了する - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn quit_app(app_name: &str) -> bool {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/IM", &format!("{}.exe", app_name), "/F"]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// 現在のウィンドウ/タブを閉じる（Cmd+W / Ctrl+W）- macOS版
+    #[cfg(target_os = "macos")]
     pub fn close_current_window() -> bool {
         let script = r#"
             tell application "System Events"
@@ -140,7 +400,38 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// Spotlight検索を開いてクエリを入力（クリップボード経由でIME問題を回避）
+    /// 現在のウィンドウ/タブを閉じる（Ctrl+W）- Windows版
+    #[cfg(target_os = "windows")]
+    pub fn close_current_window() -> bool {
+        // Ctrl+W を送信
+        let script = r#"
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Keyboard {
+                [DllImport("user32.dll")]
+                public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+            }
+'@
+            $VK_CONTROL = 0x11
+            $VK_W = 0x57
+            $KEYDOWN = 0x0000
+            $KEYUP = 0x0002
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYDOWN, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_W, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event($VK_W, 0, $KEYUP, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYUP, [UIntPtr]::Zero)
+        "#;
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// Spotlight検索を開いてクエリを入力 - macOS版
+    #[cfg(target_os = "macos")]
     pub fn spotlight_search(query: &str) -> bool {
         let escaped = query
             .replace("\\", "\\\\")
@@ -176,6 +467,50 @@ impl SystemController {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    /// Windows検索を開いてクエリを入力 - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn spotlight_search(query: &str) -> bool {
+        // Win+S で検索を開き、クエリを入力
+        let script = format!(
+            r#"
+            Set-Clipboard -Value '{}'
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Keyboard {{
+                [DllImport("user32.dll")]
+                public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+            }}
+'@
+            $VK_LWIN = 0x5B
+            $VK_S = 0x53
+            $VK_CONTROL = 0x11
+            $VK_V = 0x56
+            $KEYDOWN = 0x0000
+            $KEYUP = 0x0002
+            # Win+S
+            [Keyboard]::keybd_event($VK_LWIN, 0, $KEYDOWN, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_S, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event($VK_S, 0, $KEYUP, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_LWIN, 0, $KEYUP, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 300
+            # Ctrl+V
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYDOWN, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_V, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event($VK_V, 0, $KEYUP, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYUP, [UIntPtr]::Zero)
+            "#,
+            query.replace("'", "''")
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     }
 
     /// ディレクトリの内容を取得
@@ -255,7 +590,8 @@ impl SystemController {
         entries
     }
 
-    /// ファイルを開く
+    /// ファイルを開く - macOS版
+    #[cfg(target_os = "macos")]
     pub fn open_file(path: &str) -> bool {
         Command::new("open")
             .arg(path)
@@ -264,7 +600,19 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// Safari/Chromeのタブ一覧を取得
+    /// ファイルを開く - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn open_file(path: &str) -> bool {
+        Command::new("cmd")
+            .args(["/C", "start", "", path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Safari/Chromeのタブ一覧を取得 - macOS版
+    #[cfg(target_os = "macos")]
     pub fn get_browser_tabs(app_name: &str) -> Vec<BrowserTab> {
         let script = if app_name.to_lowercase().contains("safari") {
             r#"
@@ -319,7 +667,14 @@ impl SystemController {
         }
     }
 
-    /// Safariのタブをアクティブにする
+    /// ブラウザタブ一覧 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_browser_tabs(_app_name: &str) -> Vec<BrowserTab> {
+        Vec::new()
+    }
+
+    /// Safariのタブをアクティブにする - macOS版
+    #[cfg(target_os = "macos")]
     pub fn activate_safari_tab(tab_index: usize) -> bool {
         let script = format!(
             r#"
@@ -350,7 +705,14 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// Chromeのタブをアクティブにする
+    /// Safariタブアクティベート - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn activate_safari_tab(_tab_index: usize) -> bool {
+        false
+    }
+
+    /// Chromeのタブをアクティブにする - macOS版
+    #[cfg(target_os = "macos")]
     pub fn activate_chrome_tab(tab_index: usize) -> bool {
         let script = format!(
             r#"
@@ -385,7 +747,14 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// クリップボード経由でテキストを入力（IMEの影響を受けない）
+    /// Chromeタブアクティベート - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn activate_chrome_tab(_tab_index: usize) -> bool {
+        false
+    }
+
+    /// クリップボード経由でテキストを入力 - macOS版
+    #[cfg(target_os = "macos")]
     pub fn type_text(text: &str) -> bool {
         let escaped = text
             .replace("\\", "\\\\")
@@ -419,7 +788,42 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// テキストを入力してEnterキーを押す（LINEなどでメッセージ送信）
+    /// クリップボード経由でテキストを入力 - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn type_text(text: &str) -> bool {
+        let script = format!(
+            r#"
+            Set-Clipboard -Value '{}'
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Keyboard {{
+                [DllImport("user32.dll")]
+                public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+            }}
+'@
+            $VK_CONTROL = 0x11
+            $VK_V = 0x56
+            $KEYDOWN = 0x0000
+            $KEYUP = 0x0002
+            Start-Sleep -Milliseconds 100
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYDOWN, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_V, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event($VK_V, 0, $KEYUP, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYUP, [UIntPtr]::Zero)
+            "#,
+            text.replace("'", "''")
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// テキストを入力してEnterキーを押す - macOS版
+    #[cfg(target_os = "macos")]
     pub fn type_text_and_enter(text: &str) -> bool {
         let escaped = text
             .replace("\\", "\\\\")
@@ -459,7 +863,49 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// AppleScript経由でキーを押す
+    /// テキストを入力してEnterキーを押す - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn type_text_and_enter(text: &str) -> bool {
+        let script = format!(
+            r#"
+            Set-Clipboard -Value '{}'
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Keyboard {{
+                [DllImport("user32.dll")]
+                public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+            }}
+'@
+            $VK_CONTROL = 0x11
+            $VK_V = 0x56
+            $VK_RETURN = 0x0D
+            $KEYDOWN = 0x0000
+            $KEYUP = 0x0002
+            Start-Sleep -Milliseconds 100
+            # Ctrl+V
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYDOWN, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_V, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event($VK_V, 0, $KEYUP, [UIntPtr]::Zero)
+            [Keyboard]::keybd_event($VK_CONTROL, 0, $KEYUP, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 200
+            # Enter
+            [Keyboard]::keybd_event($VK_RETURN, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event($VK_RETURN, 0, $KEYUP, [UIntPtr]::Zero)
+            "#,
+            text.replace("'", "''")
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// キーを押す - macOS版
+    #[cfg(target_os = "macos")]
     pub fn press_key(key: &str) -> bool {
         // key codeを直接使う
         let script = match key.to_lowercase().as_str() {
@@ -491,7 +937,49 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// Terminal.appのウィンドウ・タブ一覧を取得
+    /// キーを押す - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn press_key(key: &str) -> bool {
+        let vk_code = match key.to_lowercase().as_str() {
+            "enter" | "return" => "0x0D",
+            "tab" => "0x09",
+            "escape" | "esc" => "0x1B",
+            "delete" | "backspace" => "0x08",
+            "space" => "0x20",
+            "up" => "0x26",
+            "down" => "0x28",
+            "left" => "0x25",
+            "right" => "0x27",
+            _ => return false,
+        };
+
+        let script = format!(
+            r#"
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Keyboard {{
+                [DllImport("user32.dll")]
+                public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+            }}
+'@
+            $KEYDOWN = 0x0000
+            $KEYUP = 0x0002
+            [Keyboard]::keybd_event({}, 0, $KEYDOWN, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Keyboard]::keybd_event({}, 0, $KEYUP, [UIntPtr]::Zero)
+            "#,
+            vk_code, vk_code
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// Terminal.appのウィンドウ・タブ一覧を取得 - macOS版
+    #[cfg(target_os = "macos")]
     pub fn get_terminal_tabs() -> Vec<TerminalTab> {
         let script = r#"
             tell application "Terminal"
@@ -531,7 +1019,14 @@ impl SystemController {
         }
     }
 
-    /// iTerm2のウィンドウ・タブ一覧を取得
+    /// Terminal.appタブ一覧 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_terminal_tabs() -> Vec<TerminalTab> {
+        Vec::new()
+    }
+
+    /// iTerm2のウィンドウ・タブ一覧を取得 - macOS版
+    #[cfg(target_os = "macos")]
     pub fn get_iterm_tabs() -> Vec<TerminalTab> {
         let script = r#"
             tell application "iTerm2"
@@ -569,7 +1064,14 @@ impl SystemController {
         }
     }
 
-    /// Terminal.appの特定のタブをアクティブにする
+    /// iTerm2タブ一覧 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_iterm_tabs() -> Vec<TerminalTab> {
+        Vec::new()
+    }
+
+    /// Terminal.appの特定のタブをアクティブにする - macOS版
+    #[cfg(target_os = "macos")]
     pub fn activate_terminal_tab(window_index: usize, tab_index: usize) -> bool {
         let script = format!(
             r#"
@@ -591,7 +1093,14 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// iTerm2の特定のタブをアクティブにする
+    /// Terminal.appタブアクティベート - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn activate_terminal_tab(_window_index: usize, _tab_index: usize) -> bool {
+        false
+    }
+
+    /// iTerm2の特定のタブをアクティブにする - macOS版
+    #[cfg(target_os = "macos")]
     pub fn activate_iterm_tab(window_index: usize, tab_index: usize) -> bool {
         let script = format!(
             r#"
@@ -615,7 +1124,14 @@ impl SystemController {
             .unwrap_or(false)
     }
 
-    /// 最前面のウィンドウ情報を取得
+    /// iTerm2タブアクティベート - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn activate_iterm_tab(_window_index: usize, _tab_index: usize) -> bool {
+        false
+    }
+
+    /// 最前面のウィンドウ情報を取得 - macOS版
+    #[cfg(target_os = "macos")]
     pub fn get_frontmost_window() -> Option<AppWindowInfo> {
         let script = r#"
             tell application "System Events"
@@ -665,6 +1181,75 @@ impl SystemController {
         }
     }
 
+    /// 最前面のウィンドウ情報を取得 - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn get_frontmost_window() -> Option<AppWindowInfo> {
+        let script = r#"
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Text;
+            public class Win32 {
+                [DllImport("user32.dll")]
+                public static extern IntPtr GetForegroundWindow();
+                [DllImport("user32.dll")]
+                public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+                [DllImport("user32.dll")]
+                public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+                [DllImport("user32.dll")]
+                public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+                [StructLayout(LayoutKind.Sequential)]
+                public struct RECT {
+                    public int Left, Top, Right, Bottom;
+                }
+            }
+'@
+            $hwnd = [Win32]::GetForegroundWindow()
+            $sb = New-Object System.Text.StringBuilder 256
+            [Win32]::GetWindowText($hwnd, $sb, 256) | Out-Null
+            $title = $sb.ToString()
+            $processId = 0
+            [Win32]::GetWindowThreadProcessId($hwnd, [ref]$processId) | Out-Null
+            $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            $appName = if ($proc) { $proc.ProcessName } else { "Unknown" }
+            $rect = New-Object Win32+RECT
+            [Win32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+            $x = $rect.Left
+            $y = $rect.Top
+            $width = $rect.Right - $rect.Left
+            $height = $rect.Bottom - $rect.Top
+            "$appName|$title|$x|$y|$width|$height"
+        "#;
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        match cmd.output() {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let parts: Vec<&str> = stdout.trim().split('|').collect();
+
+                if parts.len() >= 6 {
+                    Some(AppWindowInfo {
+                        app_name: parts[0].to_string(),
+                        window_title: parts[1].to_string(),
+                        x: parts[2].parse().unwrap_or(0),
+                        y: parts[3].parse().unwrap_or(0),
+                        width: parts[4].parse().unwrap_or(0),
+                        height: parts[5].parse().unwrap_or(0),
+                    })
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to get frontmost window: {}", e);
+                None
+            }
+        }
+    }
+
     /// 指定アプリのウィンドウを最前面に持ってきて最大化し、サイズを取得
     pub fn focus_and_get_window(app_name: &str) -> Option<AppWindowInfo> {
         // まずアプリをフォーカス
@@ -682,7 +1267,8 @@ impl SystemController {
         Self::get_frontmost_window()
     }
 
-    /// ウィンドウを最大化（フルスクリーンではなく画面いっぱいに）
+    /// ウィンドウを最大化（フルスクリーンではなく画面いっぱいに）- macOS版
+    #[cfg(target_os = "macos")]
     pub fn maximize_window() -> bool {
         // メニューバーの高さは25px、Dockの高さを考慮して動的に計算
         let script = r#"
@@ -714,6 +1300,30 @@ impl SystemController {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    /// ウィンドウを最大化 - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn maximize_window() -> bool {
+        let script = r#"
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Win32 {
+                [DllImport("user32.dll")]
+                public static extern IntPtr GetForegroundWindow();
+                [DllImport("user32.dll")]
+                public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+            }
+'@
+            $hwnd = [Win32]::GetForegroundWindow()
+            [Win32]::ShowWindow($hwnd, 3)  # SW_MAXIMIZE = 3
+        "#;
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     }
 }
 

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/command.dart';
 import '../models/connection_info.dart';
+import 'webrtc_service.dart';
 
 enum WsConnectionState { disconnected, connecting, connected, error }
 
@@ -104,6 +105,27 @@ class TerminalTab {
   }
 }
 
+/// アプリのウィンドウ一覧用
+class WindowListItem {
+  final int index;
+  final String title;
+  final bool isMinimized;
+
+  WindowListItem({
+    required this.index,
+    required this.title,
+    required this.isMinimized,
+  });
+
+  factory WindowListItem.fromJson(Map<String, dynamic> json) {
+    return WindowListItem(
+      index: json['index'] as int,
+      title: json['title'] as String? ?? '',
+      isMinimized: json['is_minimized'] as bool? ?? false,
+    );
+  }
+}
+
 class AppWindowInfo {
   final String appName;
   final String windowTitle;
@@ -165,6 +187,9 @@ class WebSocketState {
   final String? targetApp; // 最後に選択したアプリ
   final AppWindowInfo? windowInfo; // 現在のウィンドウ情報
   final MousePosition? pcMousePosition; // PCのマウスカーソル位置
+  final bool isWebRTCActive; // WebRTCモードがアクティブか
+  final String? webrtcConnectionState; // WebRTC接続状態
+  final List<WindowListItem> appWindows; // アプリのウィンドウ一覧
 
   WebSocketState({
     this.connectionState = WsConnectionState.disconnected,
@@ -183,6 +208,9 @@ class WebSocketState {
     this.targetApp,
     this.windowInfo,
     this.pcMousePosition,
+    this.isWebRTCActive = false,
+    this.webrtcConnectionState,
+    this.appWindows = const [],
   });
 
   WebSocketState copyWith({
@@ -202,6 +230,10 @@ class WebSocketState {
     String? targetApp,
     AppWindowInfo? windowInfo,
     MousePosition? pcMousePosition,
+    bool clearWindowInfo = false,
+    bool? isWebRTCActive,
+    String? webrtcConnectionState,
+    List<WindowListItem>? appWindows,
   }) {
     return WebSocketState(
       connectionState: connectionState ?? this.connectionState,
@@ -218,8 +250,11 @@ class WebSocketState {
       browserTabs: browserTabs ?? this.browserTabs,
       terminalTabs: terminalTabs ?? this.terminalTabs,
       targetApp: targetApp ?? this.targetApp,
-      windowInfo: windowInfo ?? this.windowInfo,
+      windowInfo: clearWindowInfo ? null : (windowInfo ?? this.windowInfo),
       pcMousePosition: pcMousePosition ?? this.pcMousePosition,
+      isWebRTCActive: isWebRTCActive ?? this.isWebRTCActive,
+      webrtcConnectionState: webrtcConnectionState ?? this.webrtcConnectionState,
+      appWindows: appWindows ?? this.appWindows,
     );
   }
 }
@@ -228,6 +263,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
   ConnectionInfo? _connectionInfo;
+  WebRTCService? _webrtcService;
 
   WebSocketService() : super(WebSocketState());
 
@@ -268,6 +304,8 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   }
 
   void disconnect() {
+    _webrtcService?.close();
+    _webrtcService = null;
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
@@ -297,6 +335,53 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   void stopScreenShare() {
     _send({'type': 'stop_screen_share'});
     state = state.copyWith(isScreenSharing: false, currentFrame: null);
+  }
+
+  // WebRTC画面共有開始
+  Future<void> startWebRTCScreenShare() async {
+    print('[WebRTC] Starting WebRTC screen share...');
+
+    // WebRTCサービスを初期化
+    _webrtcService = WebRTCService();
+    await _webrtcService!.initialize();
+
+    // フレーム受信コールバック
+    _webrtcService!.onFrame = (frame) {
+      print('[WebRTC] Updating state with frame: ${frame.length} bytes, first bytes: ${frame.take(10).toList()}');
+      state = state.copyWith(currentFrame: frame);
+    };
+
+    // 接続状態コールバック
+    _webrtcService!.onConnectionStateChange = (stateStr) {
+      print('[WebRTC] Connection state: $stateStr');
+      state = state.copyWith(webrtcConnectionState: stateStr);
+    };
+
+    // ICE候補コールバック（サーバーに送信）
+    _webrtcService!.onIceCandidate = (candidateStr) {
+      print('[WebRTC] Sending ICE candidate');
+      _send({
+        'type': 'webrtc_ice_candidate',
+        'candidate': candidateStr,
+      });
+    };
+
+    // サーバーにWebRTC開始を要求
+    _send({'type': 'start_webrtc'});
+    state = state.copyWith(isWebRTCActive: true, isScreenSharing: true);
+  }
+
+  // WebRTC画面共有停止
+  void stopWebRTCScreenShare() {
+    _send({'type': 'stop_webrtc'});
+    _webrtcService?.close();
+    _webrtcService = null;
+    state = state.copyWith(
+      isWebRTCActive: false,
+      isScreenSharing: false,
+      currentFrame: null,
+      webrtcConnectionState: null,
+    );
   }
 
   void sendMouseMove(int x, int y) {
@@ -456,6 +541,25 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     });
   }
 
+  // アプリのウィンドウ一覧を取得
+  void getAppWindows(String appName) {
+    _send({
+      'type': 'get_app_windows',
+      'app_name': appName,
+    });
+  }
+
+  // 特定のウィンドウをフォーカス
+  void focusAppWindow(String appName, int windowIndex) {
+    // ターゲットアプリを保存
+    state = state.copyWith(targetApp: appName);
+    _send({
+      'type': 'focus_app_window',
+      'app_name': appName,
+      'window_index': windowIndex,
+    });
+  }
+
   // アプリを終了する
   void quitApp(String appName) {
     _send({
@@ -480,7 +584,8 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   // アプリをフォーカスしてウィンドウ情報を取得
   void focusAndGetWindow(String appName) {
-    state = state.copyWith(targetApp: appName);
+    // windowInfoをクリアして新しい値を待つ
+    state = state.copyWith(targetApp: appName, clearWindowInfo: true);
     _send({
       'type': 'focus_and_get_window',
       'app_name': appName,
@@ -605,6 +710,14 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           state = state.copyWith(terminalTabs: tabs);
           break;
 
+        case 'app_windows':
+          final windowsJson = data['windows'] as List<dynamic>;
+          final windows = windowsJson
+              .map((w) => WindowListItem.fromJson(w as Map<String, dynamic>))
+              .toList();
+          state = state.copyWith(appWindows: windows);
+          break;
+
         case 'window_info':
           final infoJson = data['info'];
           if (infoJson != null) {
@@ -618,9 +731,56 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final y = data['y'] as int;
           state = state.copyWith(pcMousePosition: MousePosition(x: x, y: y));
           break;
+
+        // WebRTCシグナリング
+        case 'webrtc_offer':
+          final sdp = data['sdp'] as String;
+          print('[WebRTC] Received offer, creating answer...');
+          _handleWebRTCOffer(sdp);
+          break;
+
+        case 'webrtc_ice_candidate':
+          final candidateJson = data['candidate'] as String;
+          print('[WebRTC] Received ICE candidate');
+          _handleWebRTCIceCandidate(candidateJson);
+          break;
       }
     } catch (e) {
       print('Error parsing message: $e');
+    }
+  }
+
+  // WebRTCオファーを処理してアンサーを返す
+  Future<void> _handleWebRTCOffer(String sdp) async {
+    if (_webrtcService == null) {
+      print('[WebRTC] Service not initialized');
+      return;
+    }
+
+    final answer = await _webrtcService!.handleOffer(sdp);
+    if (answer != null) {
+      print('[WebRTC] Sending answer');
+      _send({
+        'type': 'webrtc_answer',
+        'sdp': answer,
+      });
+    } else {
+      print('[WebRTC] Failed to create answer');
+    }
+  }
+
+  // WebRTC ICE候補を追加
+  Future<void> _handleWebRTCIceCandidate(String candidateJson) async {
+    if (_webrtcService == null) {
+      print('[WebRTC] Service not initialized');
+      return;
+    }
+
+    try {
+      final candidateMap = jsonDecode(candidateJson) as Map<String, dynamic>;
+      await _webrtcService!.addIceCandidate(candidateMap);
+    } catch (e) {
+      print('[WebRTC] Error parsing ICE candidate: $e');
     }
   }
 
