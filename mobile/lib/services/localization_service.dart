@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // サポートする言語
@@ -102,6 +101,10 @@ class L10n {
   String get running => language == AppLanguage.ja ? '実行中...' : 'Running...';
   String get success => language == AppLanguage.ja ? '成功' : 'Success';
   String get failed => language == AppLanguage.ja ? '失敗' : 'Failed';
+  String get command => language == AppLanguage.ja ? 'コマンド' : 'Command';
+  String get deleteCommand => language == AppLanguage.ja ? 'コマンド削除' : 'Delete Command';
+  String get deleteConfirm => language == AppLanguage.ja ? 'を削除しますか？' : 'Delete this?';
+  String get deleteBtn => language == AppLanguage.ja ? '削除' : 'Delete';
 
   // ===== Screen Share Screen =====
   String get apps => language == AppLanguage.ja ? 'アプリ' : 'Apps';
@@ -159,6 +162,69 @@ class L10n {
   String get enter => 'Enter';
   String get escape => 'Esc';
   String get delete => 'Del';
+
+  // キーボード入力
+  String get realtimeMode => language == AppLanguage.ja ? 'リアルタイム' : 'Realtime';
+  String get manualMode => language == AppLanguage.ja ? '手動送信' : 'Manual';
+  String get inputHint => language == AppLanguage.ja ? '入力...' : 'Input...';
+  String get realtimeInputHint => language == AppLanguage.ja ? '入力するとリアルタイムで反映...' : 'Type to send in realtime...';
+  String get textInput => language == AppLanguage.ja ? 'テキスト入力' : 'Text Input';
+  String get sendToApp => language == AppLanguage.ja ? ' に送信' : '';
+  String get inputTextHint => language == AppLanguage.ja ? '入力するテキスト...' : 'Text to type...';
+  String get autoEnterAfterSend => language == AppLanguage.ja ? '送信後にEnterを押す' : 'Press Enter after send';
+  String get messageSend => language == AppLanguage.ja ? '(メッセージ送信)' : '(Send message)';
+  String get sendAndEnter => language == AppLanguage.ja ? '送信 + Enter' : 'Send + Enter';
+
+  // ウィンドウ関連
+  String windowsOf(String appName) => language == AppLanguage.ja
+      ? '$appName のウィンドウ'
+      : 'Windows of $appName';
+  String get selectWindow => language == AppLanguage.ja ? 'ウィンドウを選択してください' : 'Select a window';
+  String get fetchingWindows => language == AppLanguage.ja ? 'ウィンドウを取得中...' : 'Fetching windows...';
+  String get noTitle => language == AppLanguage.ja ? '(タイトルなし)' : '(No title)';
+  String get minimized => language == AppLanguage.ja ? '最小化中' : 'Minimized';
+  String tabsOf(String appName) => language == AppLanguage.ja
+      ? '$appName のタブ'
+      : 'Tabs of $appName';
+
+  // Spotlight
+  String get spotlightSearch => language == AppLanguage.ja ? 'Spotlight検索' : 'Spotlight Search';
+  String get searchHint => language == AppLanguage.ja ? 'アプリ名やファイル名...' : 'App or file name...';
+  String get search => language == AppLanguage.ja ? '検索' : 'Search';
+
+  // 画面共有画面
+  String get startScreenShare => language == AppLanguage.ja ? '画面共有を開始' : 'Start Screen Share';
+  String get screenShareDescription => language == AppLanguage.ja
+      ? 'PC画面を表示して操作できます'
+      : 'View and control your PC screen';
+
+  // 言語選択
+  String get selectLanguage => language == AppLanguage.ja ? '言語を選択' : 'Select Language';
+
+  // トライアル利用規約（Google/Apple必須）
+  String trialTermsWithPrice(String price, {required bool isIOS}) {
+    final cancelInstructions = isIOS
+        ? (language == AppLanguage.ja
+            ? '設定 > Apple ID > サブスクリプション'
+            : 'Settings > Apple ID > Subscriptions')
+        : (language == AppLanguage.ja
+            ? 'Google Play > お支払いと定期購入 > 定期購入'
+            : 'Google Play > Payments & subscriptions > Subscriptions');
+
+    return language == AppLanguage.ja
+        ? '• 3日間の無料トライアル後、$price/月が課金されます\n'
+          '• トライアル終了の24時間前までにキャンセルしない場合、自動的に定期購入が開始されます\n'
+          '• $cancelInstructionsからいつでもキャンセル可能です'
+        : '• After 3-day free trial, $price/month will be charged\n'
+          '• Subscription auto-renews unless cancelled 24 hours before trial ends\n'
+          '• Cancel anytime in $cancelInstructions';
+  }
+
+  // 閉じるダイアログ
+  String get closePaywallTitle => language == AppLanguage.ja ? 'アプリを閉じますか？' : 'Close app?';
+  String get closePaywallMessage => language == AppLanguage.ja
+      ? 'RemoteTouchを使用するにはサブスクリプションが必要です。'
+      : 'Subscription is required to use RemoteTouch.';
 }
 
 // ローカライズ文字列を取得するためのProvider

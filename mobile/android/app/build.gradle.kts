@@ -34,6 +34,12 @@ android {
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // 16KB page size support
+        ndk {
+            // Ensure all ABIs support 16KB pages
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     packaging {

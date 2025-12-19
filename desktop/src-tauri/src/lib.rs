@@ -734,15 +734,19 @@ async fn handle_connection(
                             }
                             // WebRTCアンサー受信
                             Ok(WsMessage::WebRTCAnswer { sdp }) if authenticated => {
-                                println!("[WebRTC] Received answer");
+                                println!("[WebRTC] Received answer (length: {})", sdp.len());
                                 if let Some(ref session) = webrtc_session {
+                                    println!("[WebRTC] Setting answer...");
                                     if let Err(e) = session.set_answer(&sdp).await {
                                         eprintln!("[WebRTC] Failed to set answer: {}", e);
                                     } else {
+                                        println!("[WebRTC] Answer set successfully, starting capture...");
                                         // 接続確立後、画面キャプチャ開始
                                         session.start_capture().await;
                                         println!("[WebRTC] Capture started");
                                     }
+                                } else {
+                                    eprintln!("[WebRTC] No session available to set answer!");
                                 }
                             }
                             // WebRTC ICE候補受信

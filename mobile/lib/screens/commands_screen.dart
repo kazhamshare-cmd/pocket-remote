@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../services/websocket_service.dart';
 import '../services/localization_service.dart';
+import '../services/subscription_service.dart';
 
 class CommandsScreen extends ConsumerStatefulWidget {
   const CommandsScreen({super.key});
@@ -13,30 +14,21 @@ class CommandsScreen extends ConsumerStatefulWidget {
 
 class _CommandsScreenState extends ConsumerState<CommandsScreen> {
   @override
-  void initState() {
-    super.initState();
-    print('[CommandsScreen] initState called');
-    // ターミナルタブを取得
-    Future.microtask(() {
-      ref.read(webSocketProvider.notifier).getTerminalTabs('Terminal');
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
-    print('[CommandsScreen] build called');
     final state = ref.watch(webSocketProvider);
     final l10n = ref.watch(l10nProvider);
+    final language = ref.watch(languageProvider);
 
     // 接続が切れたらスキャン画面に戻る
     if (state.connectionState == WsConnectionState.disconnected ||
         state.connectionState == WsConnectionState.error) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) context.go('/');
+        if (mounted) {
+          ref.read(subscriptionProvider.notifier).resetLoadingState();
+          context.go('/');
+        }
       });
     }
-
-    final language = ref.watch(languageProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -44,385 +36,186 @@ class _CommandsScreenState extends ConsumerState<CommandsScreen> {
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
         actions: [
-          // 言語切り替え
-          GestureDetector(
-            onTap: () {
-              ref.read(languageProvider.notifier).toggleLanguage();
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF16213e),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                language == AppLanguage.ja ? '🇯🇵' : '🇺🇸',
-                style: const TextStyle(fontSize: 16),
-              ),
-            ),
-          ),
-          // 更新ボタン
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              ref.read(webSocketProvider.notifier).getTerminalTabs('Terminal');
-            },
-          ),
           // 切断ボタン
           IconButton(
             icon: const Icon(Icons.logout),
             onPressed: () {
-              ref.read(webSocketProvider.notifier).disconnect();
+              ref.read(subscriptionProvider.notifier).resetLoadingState();
               context.go('/');
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                ref.read(webSocketProvider.notifier).disconnect();
+              });
             },
           ),
         ],
       ),
       body: Container(
         color: const Color(0xFF1a1a2e),
-        child: Column(
-          children: [
-            // 接続状態
-            Container(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Container(
-                    width: 12,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: state.connectionState == WsConnectionState.connected
-                          ? Colors.green
-                          : Colors.orange,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    state.connectionState == WsConnectionState.connected
-                        ? l10n.connected
-                        : l10n.connecting,
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                  const Spacer(),
-                  // ターゲットアプリ表示
-                  if (state.targetApp != null)
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // 接続状態
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF16213e),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      width: 12,
+                      height: 12,
                       decoration: BoxDecoration(
-                        color: const Color(0xFFe94560).withValues(alpha: 0.2),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: const Color(0xFFe94560).withValues(alpha: 0.5)),
-                      ),
-                      child: Text(
-                        state.targetApp!,
-                        style: const TextStyle(color: Color(0xFFe94560), fontSize: 12),
+                        color: state.connectionState == WsConnectionState.connected
+                            ? Colors.green
+                            : Colors.orange,
+                        shape: BoxShape.circle,
                       ),
                     ),
-                ],
+                    const SizedBox(width: 8),
+                    Text(
+                      state.connectionState == WsConnectionState.connected
+                          ? l10n.connected
+                          : l10n.connecting,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                  ],
+                ),
               ),
-            ),
-
-            // セクションヘッダー: ターミナル
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
+              const SizedBox(height: 32),
+              // 言語選択
+              Text(
+                l10n.selectLanguage,
+                style: const TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.terminal, color: Colors.white70, size: 20),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'Terminal',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const Spacer(),
-                  // 新規ターミナルボタン
-                  TextButton.icon(
-                    onPressed: () => _openNewTerminal(l10n),
-                    icon: const Icon(Icons.add, color: Color(0xFFe94560), size: 18),
-                    label: Text(
-                      l10n.add,
-                      style: const TextStyle(color: Color(0xFFe94560)),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // ターミナルタブリスト
-            Expanded(
-              child: state.terminalTabs.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                  // 日本語
+                  GestureDetector(
+                    onTap: () {
+                      ref.read(languageProvider.notifier).setLanguage(AppLanguage.ja);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: language == AppLanguage.ja
+                            ? const Color(0xFFe94560)
+                            : const Color(0xFF16213e),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: language == AppLanguage.ja
+                              ? const Color(0xFFe94560)
+                              : Colors.white24,
+                          width: 2,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.terminal, color: Colors.white24, size: 64),
-                          const SizedBox(height: 16),
+                          const Text('🇯🇵', style: TextStyle(fontSize: 24)),
+                          const SizedBox(width: 8),
                           Text(
-                            l10n.noCommands,
-                            style: const TextStyle(color: Colors.white54),
-                          ),
-                          const SizedBox(height: 24),
-                          ElevatedButton.icon(
-                            onPressed: () => _openNewTerminal(l10n),
-                            icon: const Icon(Icons.add),
-                            label: Text(l10n.add),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFFe94560),
-                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          TextButton(
-                            onPressed: () {
-                              ref.read(webSocketProvider.notifier).getTerminalTabs('Terminal');
-                            },
-                            child: Text(
-                              l10n.retry,
-                              style: const TextStyle(color: Colors.white54),
+                            '日本語',
+                            style: TextStyle(
+                              color: language == AppLanguage.ja
+                                  ? Colors.white
+                                  : Colors.white70,
+                              fontSize: 16,
+                              fontWeight: language == AppLanguage.ja
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
                             ),
                           ),
                         ],
                       ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.all(16),
-                      itemCount: state.terminalTabs.length,
-                      itemBuilder: (context, index) {
-                        final tab = state.terminalTabs[index];
-                        return Card(
-                          color: const Color(0xFF16213e),
-                          margin: const EdgeInsets.only(bottom: 12),
-                          child: ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: tab.isBusy
-                                  ? Colors.orange.withValues(alpha: 0.3)
-                                  : const Color(0xFF0a0a14),
-                              child: Text(
-                                'W${tab.windowIndex}',
-                                style: TextStyle(
-                                  color: tab.isBusy ? Colors.orange : Colors.white54,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                            title: Text(
-                              tab.title.isNotEmpty ? tab.title : '${l10n.tab} ${tab.tabIndex}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: Row(
-                              children: [
-                                Text(
-                                  '${l10n.window} ${tab.windowIndex}, ${l10n.tab} ${tab.tabIndex}',
-                                  style: const TextStyle(
-                                    color: Colors.white38,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                                if (tab.isBusy) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: Colors.orange.withValues(alpha: 0.2),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      l10n.running,
-                                      style: const TextStyle(color: Colors.orange, fontSize: 10),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                            trailing: const Icon(
-                              Icons.chevron_right,
-                              color: Colors.white38,
-                            ),
-                            onTap: () {
-                              // ターミナルタブをアクティブにして画面共有へ
-                              ref.read(webSocketProvider.notifier).activateTerminalTab(
-                                'Terminal',
-                                tab.windowIndex,
-                                tab.tabIndex,
-                              );
-                              context.go('/screen');
-                            },
-                          ),
-                        );
-                      },
-                    ),
-            ),
-
-            // クイックアクション
-            Container(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _quickActionButton(
-                      icon: Icons.apps,
-                      label: l10n.apps,
-                      onTap: () => _showAppsSheet(l10n),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _quickActionButton(
-                      icon: Icons.keyboard,
-                      label: l10n.keyboard,
-                      onTap: () {
-                        context.go('/screen');
-                        // 少し遅延してからキーボードダイアログを開く
-                      },
+                  const SizedBox(width: 16),
+                  // English
+                  GestureDetector(
+                    onTap: () {
+                      ref.read(languageProvider.notifier).setLanguage(AppLanguage.en);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: language == AppLanguage.en
+                            ? const Color(0xFFe94560)
+                            : const Color(0xFF16213e),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: language == AppLanguage.en
+                              ? const Color(0xFFe94560)
+                              : Colors.white24,
+                          width: 2,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('🇺🇸', style: TextStyle(fontSize: 24)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'English',
+                            style: TextStyle(
+                              color: language == AppLanguage.en
+                                  ? Colors.white
+                                  : Colors.white70,
+                              fontSize: 16,
+                              fontWeight: language == AppLanguage.en
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
-      ),
-      // 画面共有ボタン
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => context.go('/screen'),
-        backgroundColor: const Color(0xFFe94560),
-        icon: const Icon(Icons.screen_share),
-        label: Text(l10n.screenShare),
-      ),
-    );
-  }
-
-  Widget _quickActionButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: const Color(0xFF16213e),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, color: Colors.white70, size: 28),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _openNewTerminal(L10n l10n) {
-    // Spotlightでターミナルを開く
-    ref.read(webSocketProvider.notifier).spotlightSearch('Terminal');
-    // 少し待ってからタブを更新
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) {
-        ref.read(webSocketProvider.notifier).getTerminalTabs('Terminal');
-      }
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('${l10n.connecting}...'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-  }
-
-  void _showAppsSheet(L10n l10n) {
-    ref.read(webSocketProvider.notifier).getRunningApps();
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF16213e),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (context) => Consumer(
-        builder: (context, ref, _) {
-          final state = ref.watch(webSocketProvider);
-          return Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(
-                      l10n.runningApps,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(Icons.refresh, color: Colors.white54),
-                      onPressed: () {
-                        ref.read(webSocketProvider.notifier).getRunningApps();
-                      },
-                    ),
-                  ],
+              const SizedBox(height: 40),
+              // 画面共有アイコン
+              Container(
+                padding: const EdgeInsets.all(32),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFe94560).withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
                 ),
-                const SizedBox(height: 16),
-                if (state.runningApps.isEmpty)
-                  const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(32),
-                      child: CircularProgressIndicator(color: Color(0xFFe94560)),
-                    ),
-                  )
-                else
-                  SizedBox(
-                    height: 300,
-                    child: ListView.builder(
-                      itemCount: state.runningApps.length,
-                      itemBuilder: (context, index) {
-                        final app = state.runningApps[index];
-                        return ListTile(
-                          leading: Icon(
-                            app.isActive ? Icons.check_circle : Icons.circle_outlined,
-                            color: app.isActive ? Colors.green : Colors.white54,
-                          ),
-                          title: Text(
-                            app.name,
-                            style: TextStyle(
-                              color: app.isActive ? Colors.white : Colors.white70,
-                              fontWeight: app.isActive ? FontWeight.bold : FontWeight.normal,
-                            ),
-                          ),
-                          onTap: () {
-                            ref.read(webSocketProvider.notifier).focusApp(app.name);
-                            Navigator.pop(context);
-                            context.go('/screen');
-                          },
-                        );
-                      },
-                    ),
+                child: const Icon(
+                  Icons.screen_share,
+                  color: Color(0xFFe94560),
+                  size: 80,
+                ),
+              ),
+              const SizedBox(height: 32),
+              // 画面共有ボタン
+              ElevatedButton.icon(
+                onPressed: () => context.go('/screen'),
+                icon: const Icon(Icons.play_arrow),
+                label: Text(l10n.startScreenShare),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFe94560),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                  textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
                   ),
-              ],
-            ),
-          );
-        },
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                l10n.screenShareDescription,
+                style: const TextStyle(color: Colors.white54, fontSize: 14),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

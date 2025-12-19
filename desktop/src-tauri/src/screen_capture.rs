@@ -213,7 +213,11 @@ impl ScreenCapturer {
             // 内側ループを抜けた（ws_capture_runningがfalseになった）
             // Capturerを解放して、外側ループに戻る
             drop(capturer);
-            println!("[WS] Capturer released, waiting for restart...");
+            println!("[WS] Capturer released, waiting for system cleanup...");
+            // macOSのDisplay Streamコールバックが完全に終了するまで待機
+            // scrapライブラリのquartzバックエンドに競合状態があるため長めに待つ
+            std::thread::sleep(Duration::from_secs(3));
+            println!("[WS] Ready for restart");
             } // 外側のloop終了
         });
     }

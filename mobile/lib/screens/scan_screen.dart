@@ -28,21 +28,54 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
 
   Future<void> _initializeCamera() async {
     print('[ScanScreen] _initializeCamera started');
+
+    // 既存のコントローラーがあれば破棄
+    if (cameraController != null) {
+      print('[ScanScreen] Disposing existing controller');
+      try {
+        await cameraController!.stop();
+        await cameraController!.dispose();
+      } catch (e) {
+        print('[ScanScreen] Error disposing controller: $e');
+      }
+      cameraController = null;
+    }
+
+    // 状態をリセット
+    if (mounted) {
+      setState(() {
+        _cameraError = false;
+        _isInitialized = false;
+      });
+    }
+
+    // カメラリソースの解放を待つ
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    if (!mounted) return;
+
     try {
-      cameraController = MobileScannerController(
+      final controller = MobileScannerController(
         detectionSpeed: DetectionSpeed.normal,
         facing: CameraFacing.back,
+        autoStart: false, // 自動起動を無効化
       );
       print('[ScanScreen] MobileScannerController created');
 
-      // カメラの起動を待つ
-      await Future.delayed(const Duration(milliseconds: 500));
+      // 明示的にカメラを起動
+      await controller.start();
+      print('[ScanScreen] Camera started successfully');
 
       if (mounted) {
-        print('[ScanScreen] Setting _isInitialized = true');
         setState(() {
+          cameraController = controller;
           _isInitialized = true;
         });
+        print('[ScanScreen] Setting _isInitialized = true');
+      } else {
+        // マウントされていない場合はコントローラーを破棄
+        await controller.stop();
+        await controller.dispose();
       }
     } catch (e, stackTrace) {
       print('[ScanScreen] Camera initialization error: $e');
@@ -56,10 +89,22 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
     }
   }
 
+  /// カメラを再初期化
+  Future<void> _retryCamera() async {
+    print('[ScanScreen] Retrying camera initialization');
+    await _initializeCamera();
+  }
+
   @override
   void dispose() {
     print('[ScanScreen] dispose called');
-    cameraController?.dispose();
+    final controller = cameraController;
+    cameraController = null;
+    if (controller != null) {
+      controller.stop().then((_) => controller.dispose()).catchError((e) {
+        print('[ScanScreen] Error in dispose: $e');
+      });
+    }
     super.dispose();
   }
 
@@ -101,7 +146,13 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
     print('[ScanScreen] build called - _isInitialized: $_isInitialized, _cameraError: $_cameraError, cameraController: ${cameraController != null}');
     return Scaffold(
       appBar: AppBar(
-        title: Text(l10n.scanQRCode),
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('QRコードをスキャン', style: TextStyle(fontSize: 16)),
+            Text('Scan QR Code', style: TextStyle(fontSize: 12, color: Colors.white70)),
+          ],
+        ),
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
       ),
@@ -134,10 +185,20 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                   children: [
                     const Icon(Icons.videocam_off, color: Colors.white54, size: 64),
                     const SizedBox(height: 16),
-                    Text(
-                      l10n.cameraPermissionRequired,
-                      style: const TextStyle(color: Colors.white54, fontSize: 16),
+                    const Text(
+                      'カメラ許可が必要です\nCamera permission required',
+                      style: TextStyle(color: Colors.white54, fontSize: 16),
                       textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 24),
+                    ElevatedButton.icon(
+                      onPressed: _retryCamera,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('再試行 / Retry'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFe94560),
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      ),
                     ),
                   ],
                 ),
@@ -203,8 +264,8 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
             right: 20,
             child: Text(
               _cameraError
-                  ? l10n.manualConnection
-                  : l10n.scanQRCode,
+                  ? '手動接続を使用\nUse manual connection'
+                  : 'PCのQRコードをスキャン\nScan QR code on your PC',
               textAlign: TextAlign.center,
               style: const TextStyle(
                 color: Colors.white,
@@ -229,7 +290,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                 backgroundColor: const Color(0xFFe94560),
                 padding: const EdgeInsets.symmetric(vertical: 16),
               ),
-              child: Text(l10n.manualConnection),
+              child: const Text('手動接続 / Manual Connection'),
             ),
           ),
         ],

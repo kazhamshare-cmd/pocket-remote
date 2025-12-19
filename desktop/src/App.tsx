@@ -27,24 +27,39 @@ interface ConnectionRequest {
   ip_address: string;
 }
 
-// 通知音を鳴らす関数
+// 通知音を鳴らす関数（ピンポン音）
 function playNotificationSound() {
-  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const oscillator = audioContext.createOscillator();
-  const gainNode = audioContext.createGain();
+  try {
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
 
-  oscillator.connect(gainNode);
-  gainNode.connect(audioContext.destination);
+    // 最初の音（ピン）
+    const osc1 = audioContext.createOscillator();
+    const gain1 = audioContext.createGain();
+    osc1.connect(gain1);
+    gain1.connect(audioContext.destination);
+    osc1.frequency.value = 880; // A5
+    osc1.type = 'sine';
+    gain1.gain.setValueAtTime(0.5, audioContext.currentTime);
+    gain1.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+    osc1.start(audioContext.currentTime);
+    osc1.stop(audioContext.currentTime + 0.2);
 
-  // 2つのビープ音（ピンポン）
-  oscillator.frequency.setValueAtTime(880, audioContext.currentTime); // A5
-  oscillator.frequency.setValueAtTime(1100, audioContext.currentTime + 0.15); // C#6
+    // 2番目の音（ポン）
+    const osc2 = audioContext.createOscillator();
+    const gain2 = audioContext.createGain();
+    osc2.connect(gain2);
+    gain2.connect(audioContext.destination);
+    osc2.frequency.value = 1100; // C#6
+    osc2.type = 'sine';
+    gain2.gain.setValueAtTime(0.5, audioContext.currentTime + 0.2);
+    gain2.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.4);
+    osc2.start(audioContext.currentTime + 0.2);
+    osc2.stop(audioContext.currentTime + 0.4);
 
-  gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-  gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
-
-  oscillator.start(audioContext.currentTime);
-  oscillator.stop(audioContext.currentTime + 0.3);
+    console.log('[Audio] Notification sound played');
+  } catch (e) {
+    console.error('[Audio] Failed to play notification sound:', e);
+  }
 }
 
 function App() {

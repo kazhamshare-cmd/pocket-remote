@@ -1250,21 +1250,142 @@ impl SystemController {
         }
     }
 
-    /// 指定アプリのウィンドウを最前面に持ってきて最大化し、サイズを取得
+    /// 指定アプリのウィンドウを最前面に持ってきてサイズを取得（最大化しない）
     pub fn focus_and_get_window(app_name: &str) -> Option<AppWindowInfo> {
         // まずアプリをフォーカス
         Self::focus_app(app_name);
 
         // 少し待機
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // ウィンドウを最大化して他のアプリを隠す
-        Self::maximize_window();
-
-        // 最大化後に少し待ってからウィンドウ情報を取得
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        Self::get_frontmost_window()
+        // ウィンドウを左上に移動（座標計算を簡単にするため）
+        Self::move_window_to_top_left(None, None);
+
+        // 移動後に少し待機してからウィンドウ情報を取得
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let window_info = Self::get_frontmost_window();
+
+        // ウィンドウの中央をクリックしてカーソルをアクティブ化
+        // ただし、指定したアプリのウィンドウである場合のみ
+        if let Some(ref info) = window_info {
+            // アプリ名が一致するか確認（大文字小文字を無視して部分一致）
+            let info_app_lower = info.app_name.to_lowercase();
+            let target_app_lower = app_name.to_lowercase();
+
+            if info_app_lower.contains(&target_app_lower) || target_app_lower.contains(&info_app_lower) {
+                let center_x = info.x + (info.width / 2);
+                let center_y = info.y + (info.height / 2);
+                println!("[SystemControl] App matched: '{}' == '{}'. Window at ({}, {}), clicking center ({}, {})",
+                    info.app_name, app_name, info.x, info.y, center_x, center_y);
+                Self::click_at(center_x as f64, center_y as f64);
+            } else {
+                println!("[SystemControl] App mismatch: frontmost='{}', target='{}'. Skipping click.",
+                    info.app_name, app_name);
+            }
+        }
+
+        window_info
+    }
+
+    /// 指定座標をクリック（CoreGraphics使用）
+    #[cfg(target_os = "macos")]
+    pub fn click_at(x: f64, y: f64) {
+        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        use core_graphics::geometry::CGPoint;
+
+        let point = CGPoint::new(x, y);
+
+        // マウスダウン
+        if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+            if let Ok(event) = CGEvent::new_mouse_event(
+                source.clone(),
+                CGEventType::LeftMouseDown,
+                point,
+                CGMouseButton::Left,
+            ) {
+                event.post(CGEventTapLocation::HID);
+            }
+        }
+
+        // 少し待機
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // マウスアップ
+        if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+            if let Ok(event) = CGEvent::new_mouse_event(
+                source.clone(),
+                CGEventType::LeftMouseUp,
+                point,
+                CGMouseButton::Left,
+            ) {
+                event.post(CGEventTapLocation::HID);
+            }
+        }
+
+        println!("[SystemControl] Clicked at ({}, {})", x, y);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn click_at(_x: f64, _y: f64) {
+        // Windows/Linux版は未実装
+    }
+
+    /// フォーカス中のウィンドウを左上(0,0)に移動し、指定サイズに変更 - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn move_window_to_top_left(width: Option<i32>, height: Option<i32>) -> bool {
+        // ウィンドウを(0, 25)に移動（25はメニューバーの高さ）
+        // サイズが指定されていれば変更
+        let size_script = if let (Some(w), Some(h)) = (width, height) {
+            format!(
+                r#"
+                    set size of frontWindow to {{{}, {}}}
+                "#,
+                w, h
+            )
+        } else {
+            String::new()
+        };
+
+        let script = format!(
+            r#"
+            tell application "System Events"
+                set frontApp to first application process whose frontmost is true
+                try
+                    set frontWindow to first window of frontApp
+                    set position of frontWindow to {{0, 25}}
+                    {}
+                    return "success"
+                on error errMsg
+                    return "error: " & errMsg
+                end try
+            end tell
+            "#,
+            size_script
+        );
+
+        match Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let success = stdout.trim().starts_with("success");
+                println!("[SystemControl] move_window_to_top_left: {}", stdout.trim());
+                success
+            }
+            Err(e) => {
+                println!("[SystemControl] move_window_to_top_left error: {}", e);
+                false
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn move_window_to_top_left(_width: Option<i32>, _height: Option<i32>) -> bool {
+        // Windows/Linux版は未実装
+        false
     }
 
     /// ウィンドウを最大化（フルスクリーンではなく画面いっぱいに）- macOS版

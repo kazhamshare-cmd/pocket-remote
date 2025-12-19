@@ -289,7 +289,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
       final authMsg = {
         'type': 'auth',
         'token': info.token,
-        'device_name': 'Flutter App',
+        'device_name': 'RemoteTouch',
         'is_external': info.isExternal,
       };
       print('[WebSocket] Sending auth: $authMsg');

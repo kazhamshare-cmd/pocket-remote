@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -60,10 +61,28 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
           padding: const EdgeInsets.all(20.0),
           child: Column(
             children: [
-              // Language Switcher at top
+              // Close button & Language Switcher at top
               Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
+                  // Close button (X)
+                  GestureDetector(
+                    onTap: () => _showCloseConfirmDialog(context, l10n),
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF16213e),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.white24, width: 2),
+                      ),
+                      child: const Icon(
+                        Icons.close,
+                        color: Colors.white70,
+                        size: 24,
+                      ),
+                    ),
+                  ),
                   _buildLanguageSwitcher(ref, language),
                 ],
               ),
@@ -143,6 +162,27 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
                       style: const TextStyle(
                         color: Colors.white54,
                         fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // Trial Terms (Required by Google/Apple)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.3),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        l10n.trialTermsWithPrice(
+                          subscription.product?.price ?? '\$2.99',
+                          isIOS: Platform.isIOS,
+                        ),
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 11,
+                          height: 1.4,
+                        ),
+                        textAlign: TextAlign.center,
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -382,7 +422,10 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
   }
 
   Future<void> _openSubscriptionManagement() async {
-    final url = Uri.parse('https://apps.apple.com/account/subscriptions');
+    final urlString = Platform.isIOS
+        ? 'https://apps.apple.com/account/subscriptions'
+        : 'https://play.google.com/store/account/subscriptions';
+    final url = Uri.parse(urlString);
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     }
@@ -410,6 +453,35 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: Text(l10n.close, style: const TextStyle(color: Color(0xFFe94560))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showCloseConfirmDialog(BuildContext context, L10n l10n) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF16213e),
+        title: Text(l10n.closePaywallTitle, style: const TextStyle(color: Colors.white)),
+        content: Text(
+          l10n.closePaywallMessage,
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              // アプリを終了（または制限モードへ）
+              // SystemNavigator.pop(); // アプリ終了
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
+            child: Text(l10n.close),
           ),
         ],
       ),
