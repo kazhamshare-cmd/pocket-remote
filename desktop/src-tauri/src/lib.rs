@@ -20,7 +20,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use screen_capture::ScreenCapturer;
 use input_control::{InputController, InputEvent, get_mouse_position};
-use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, TerminalTab, AppWindowInfo, WindowListItem};
+use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, TerminalTab, AppWindowInfo, WindowListItem, MessagesChat};
 use webrtc_screen::WebRTCScreenShare;
 
 // 接続情報
@@ -80,6 +80,18 @@ enum WsMessage {
     SetCaptureRegion { x: i32, y: i32, width: i32, height: i32 },
     #[serde(rename = "reset_capture_region")]
     ResetCaptureRegion,
+    // ビューポート設定（スクロール対応）
+    #[serde(rename = "set_viewport")]
+    SetViewport {
+        viewport_x: i32,
+        viewport_y: i32,
+        viewport_width: i32,
+        viewport_height: i32,
+        quality_mode: String,  // "low" or "high"
+    },
+    // スクロール（ブラウザ等用）
+    #[serde(rename = "scroll")]
+    Scroll { direction: String, amount: i32 },
     // マウス位置
     #[serde(rename = "mouse_position")]
     MousePosition { x: i32, y: i32 },
@@ -130,6 +142,13 @@ enum WsMessage {
     GetAppWindows { app_name: String },
     #[serde(rename = "app_windows")]
     AppWindows { app_name: String, windows: Vec<WindowListItem> },
+    // Messagesチャット一覧
+    #[serde(rename = "get_messages_chats")]
+    GetMessagesChats,
+    #[serde(rename = "messages_chats")]
+    MessagesChats { chats: Vec<MessagesChat> },
+    #[serde(rename = "open_messages_chat")]
+    OpenMessagesChat { chat_id: String },
     #[serde(rename = "focus_app_window")]
     FocusAppWindow { app_name: String, window_index: usize },
     // アプリ/ウィンドウを閉じる
@@ -146,6 +165,8 @@ enum WsMessage {
     FocusAndGetWindow { app_name: String },
     #[serde(rename = "maximize_window")]
     MaximizeWindow,
+    #[serde(rename = "resize_window")]
+    ResizeWindow { width: i32, height: i32 },
     // WebRTCシグナリング
     #[serde(rename = "webrtc_offer")]
     WebRTCOffer { sdp: String },
@@ -203,6 +224,13 @@ pub struct CaptureRegion {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    // ビューポート（ウィンドウ内の表示領域）
+    pub viewport_x: i32,
+    pub viewport_y: i32,
+    pub viewport_width: i32,
+    pub viewport_height: i32,
+    // 画質モード: "low"（スクロール中）, "high"（停止時）
+    pub quality_mode: String,
 }
 
 impl AppState {
@@ -486,13 +514,41 @@ async fn handle_connection(
                             }
                             Ok(WsMessage::SetCaptureRegion { x, y, width, height }) if authenticated => {
                                 println!("SetCaptureRegion: {}x{} at ({}, {})", width, height, x, y);
-                                *state.capture_region.write() = Some(CaptureRegion { x, y, width, height });
+                                // 新しいCaptureRegion（ビューポートはウィンドウ全体、高画質モード）
+                                *state.capture_region.write() = Some(CaptureRegion {
+                                    x, y, width, height,
+                                    viewport_x: 0,
+                                    viewport_y: 0,
+                                    viewport_width: width,
+                                    viewport_height: height,
+                                    quality_mode: "high".to_string(),
+                                });
+                            }
+                            Ok(WsMessage::SetViewport { viewport_x, viewport_y, viewport_width, viewport_height, quality_mode }) if authenticated => {
+                                // 既存のCaptureRegionのビューポートを更新
+                                let mut region = state.capture_region.write();
+                                if let Some(ref mut r) = *region {
+                                    r.viewport_x = viewport_x;
+                                    r.viewport_y = viewport_y;
+                                    r.viewport_width = viewport_width;
+                                    r.viewport_height = viewport_height;
+                                    r.quality_mode = quality_mode.clone();
+                                    if quality_mode == "high" {
+                                        println!("SetViewport: {}x{} at ({}, {}) [HIGH QUALITY]", viewport_width, viewport_height, viewport_x, viewport_y);
+                                    }
+                                }
                             }
                             Ok(WsMessage::ResetCaptureRegion) if authenticated => {
                                 println!("ResetCaptureRegion");
                                 *state.capture_region.write() = None;
                             }
+                            Ok(WsMessage::Scroll { direction, amount }) if authenticated => {
+                                println!("Scroll: {} by {}", direction, amount);
+                                state.input_controller.scroll(&direction, amount);
+                            }
                             Ok(WsMessage::Input(event)) if authenticated => {
+                                // スクロールはユーザーがタッチした位置で実行
+                                // （マウスは既にその位置に移動済み）
                                 state.input_controller.send_event(event);
                             }
                             Ok(WsMessage::GetRunningApps) if authenticated => {
@@ -547,12 +603,14 @@ async fn handle_connection(
                                 });
                             }
                             Ok(WsMessage::GetBrowserTabs { app_name }) if authenticated => {
+                                println!("GetBrowserTabs: {}", app_name);
                                 let name = app_name.clone();
                                 let write_clone = write.clone();
                                 tokio::spawn(async move {
                                     let tabs = tokio::task::spawn_blocking(move || {
                                         SystemController::get_browser_tabs(&name)
                                     }).await.unwrap_or_default();
+                                    println!("GetBrowserTabs result: {} tabs", tabs.len());
                                     let response = WsMessage::BrowserTabs { tabs };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write_clone.lock().await.send(Message::Text(json.into())).await.ok();
@@ -574,6 +632,26 @@ async fn handle_connection(
                                     let response = WsMessage::ActivateTabResult { success: true };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write_clone.lock().await.send(Message::Text(json.into())).await.ok();
+                                });
+                            }
+                            // Messagesチャット
+                            Ok(WsMessage::GetMessagesChats) if authenticated => {
+                                println!("GetMessagesChats received");
+                                let write_clone = write.clone();
+                                tokio::spawn(async move {
+                                    let chats = tokio::task::spawn_blocking(|| {
+                                        SystemController::get_messages_chats()
+                                    }).await.unwrap_or_default();
+                                    let response = WsMessage::MessagesChats { chats };
+                                    let json = serde_json::to_string(&response).unwrap();
+                                    write_clone.lock().await.send(Message::Text(json.into())).await.ok();
+                                });
+                            }
+                            Ok(WsMessage::OpenMessagesChat { chat_id }) if authenticated => {
+                                println!("OpenMessagesChat: {}", chat_id);
+                                let id = chat_id.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    SystemController::open_messages_chat(&id);
                                 });
                             }
                             Ok(WsMessage::TypeText { text }) if authenticated => {
@@ -698,6 +776,13 @@ async fn handle_connection(
                                     println!("MaximizeWindow result: {}", success);
                                 });
                             }
+                            Ok(WsMessage::ResizeWindow { width, height }) if authenticated => {
+                                println!("ResizeWindow requested: {}x{}", width, height);
+                                tokio::task::spawn_blocking(move || {
+                                    let success = SystemController::resize_window(width, height);
+                                    println!("ResizeWindow result: {}", success);
+                                });
+                            }
                             // WebRTC開始
                             Ok(WsMessage::StartWebRTC) if authenticated => {
                                 println!("[WebRTC] Starting WebRTC session...");
@@ -705,6 +790,10 @@ async fn handle_connection(
                                 state.ws_capture_running.store(false, std::sync::atomic::Ordering::SeqCst);
                                 // キャプチャが完全に停止するまで待機
                                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+                                // 新規接続時はキャプチャ領域をリセット（全画面キャプチャから開始）
+                                *state.capture_region.write() = None;
+                                println!("[WebRTC] Capture region reset to full screen");
 
                                 let ice_tx_clone = ice_tx.clone();
                                 let write_clone = write.clone();

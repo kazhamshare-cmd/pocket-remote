@@ -1,11 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:vector_math/vector_math_64.dart' as vector_math;
 import '../services/websocket_service.dart';
 import '../services/localization_service.dart';
 
@@ -17,10 +14,8 @@ class ScreenShareScreen extends ConsumerStatefulWidget {
 }
 
 class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
-  final TransformationController _transformController = TransformationController();
   final TextEditingController _textController = TextEditingController();
   final FocusNode _textFocusNode = FocusNode();
-  double _scale = 1.0;
   Offset _lastFocalPoint = Offset.zero;
   bool _isDragging = false;
   AppWindowInfo? _focusedWindow; // ズーム中のウィンドウ
@@ -34,29 +29,20 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   bool _realtimeSync = false; // リアルタイム同期モード（日本語対応のためデフォルトオフ）
   Timer? _debounceTimer; // IME入力用debounceタイマー
   String _pendingText = ''; // debounce中の保留テキスト
+  Timer? _scrollDebounceTimer; // スクロール停止検出用
+  int _pointerCount = 0; // 2本指スクロール検出用
+  Offset _lastScrollPosition = Offset.zero; // 2本指スクロール位置
+  Offset _imageScrollOffset = Offset.zero; // 画像のスクロールオフセット
   String _lastSentText = ''; // 最後に送信したテキスト
   bool _useWebRTC = true; // WebRTCモード（常にWebRTC使用）
-  List<Map<String, String>> _customCommands = []; // カスタムコマンド [{name, command}]
-
-  // 2本指スクロール用
-  int _pointerCount = 0;
-  Offset? _lastScrollPosition;
-  bool _isScrolling = false;
-
-  // 固定ズーム倍率
-  static const double _fixedZoom = 3.0;
 
   @override
   void initState() {
     super.initState();
-    // カスタムコマンドを読み込み
-    _loadCustomCommands();
     // 画面共有開始 & アプリ一覧取得
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startScreenShare();
       ref.read(webSocketProvider.notifier).getRunningApps();
-      // 3倍ズームを初期設定（画像は左上から表示）
-      _transformController.value = Matrix4.identity()..scale(_fixedZoom);
     });
     // 縦向き固定（パン・ズームで操作）
     SystemChrome.setPreferredOrientations([
@@ -64,50 +50,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     ]);
     // フルスクリーン
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  }
-
-  // カスタムコマンドを読み込み
-  Future<void> _loadCustomCommands() async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonStr = prefs.getString('custom_commands');
-    if (jsonStr != null) {
-      final list = jsonDecode(jsonStr) as List;
-      setState(() {
-        _customCommands = list.map((e) => Map<String, String>.from(e)).toList();
-      });
-    }
-  }
-
-  // カスタムコマンドを保存
-  Future<void> _saveCustomCommands() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('custom_commands', jsonEncode(_customCommands));
-  }
-
-  // カスタムコマンドを追加
-  void _addCustomCommand(String name, String command) {
-    setState(() {
-      _customCommands.add({'name': name, 'command': command});
-    });
-    _saveCustomCommands();
-  }
-
-  // カスタムコマンドを削除
-  void _removeCustomCommand(int index) {
-    setState(() {
-      _customCommands.removeAt(index);
-    });
-    _saveCustomCommands();
-  }
-
-  // カスタムコマンドを実行
-  void _executeCustomCommand(String command) {
-    // コマンドをタイプして実行
-    ref.read(webSocketProvider.notifier).typeText(command);
-    // Enterキーを送信
-    Future.delayed(const Duration(milliseconds: 100), () {
-      ref.read(webSocketProvider.notifier).pressKey('enter');
-    });
   }
 
   void _startScreenShare() {
@@ -132,6 +74,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _scrollDebounceTimer?.cancel();
     _stopScreenShare();
     // 向きを元に戻す
     SystemChrome.setPreferredOrientations([
@@ -142,36 +85,34 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     ]);
     // システムUIを元に戻す
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    _transformController.dispose();
     _textController.dispose();
     _textFocusNode.dispose();
     super.dispose();
   }
 
-  Offset? _lastTapPosition; // ダブルタップ位置検出用
-
   void _onTapDown(TapDownDetails details, Size screenSize, ScreenInfo? screenInfo) {
     if (screenInfo == null || !_mouseMode) return;
 
-    // 2本指操作中はタップを無視
-    if (_pointerCount >= 2 || _isScrolling) return;
-
     final now = DateTime.now();
-    final timeSinceLastTap = _lastTapTime != null
-        ? now.difference(_lastTapTime!).inMilliseconds
-        : 1000;
+    final isDoubleTap = _lastTapTime != null &&
+        now.difference(_lastTapTime!).inMilliseconds < 300;
 
-    // ダブルタップ判定: 400ms以内 & 50px以内の位置
-    final positionClose = _lastTapPosition != null &&
-        (details.localPosition - _lastTapPosition!).distance < 50;
-    final isDoubleTap = timeSinceLastTap < 400 && positionClose;
-
-    // InteractiveViewerの変換を考慮してリモート座標を計算
+    // リモート座標を計算
     final remotePos = _screenToRemoteCoordinates(details.localPosition, screenSize, screenInfo);
 
-    // カーソル位置を更新
+    // デバッグログ
+    print('[Touch] localPosition: ${details.localPosition}');
+    print('[Touch] screenSize: $screenSize');
+    print('[Touch] remotePos: $remotePos');
+    print('[Touch] screenInfo: ${screenInfo.width}x${screenInfo.height}');
+    if (_focusedWindow != null) {
+      print('[Touch] focusedWindow: x=${_focusedWindow!.x}, y=${_focusedWindow!.y}, ${_focusedWindow!.width}x${_focusedWindow!.height}');
+    }
+
+    // カーソル位置を更新（画面表示エリアのtopPaddingを加算）
+    final topPadding = MediaQuery.of(context).padding.top + 80;
     setState(() {
-      _cursorPosition = details.localPosition;
+      _cursorPosition = Offset(details.localPosition.dx, details.localPosition.dy + topPadding);
       _showCursor = true;
     });
 
@@ -183,7 +124,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       );
       HapticFeedback.lightImpact();
       _lastTapTime = null;
-      _lastTapPosition = null;
     } else {
       // シングルタップ = マウス移動のみ
       ref.read(webSocketProvider.notifier).sendMouseMove(
@@ -191,7 +131,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         remotePos.dy.toInt(),
       );
       _lastTapTime = now;
-      _lastTapPosition = details.localPosition;
     }
 
     // カーソルを少し後に非表示にする
@@ -210,9 +149,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
     final remotePos = _screenToRemoteCoordinates(details.localPosition, screenSize, screenInfo);
 
-    // カーソル位置を更新
+    // カーソル位置を更新（topPaddingを加算）
+    final topPadding = MediaQuery.of(context).padding.top + 80;
     setState(() {
-      _cursorPosition = details.localPosition;
+      _cursorPosition = Offset(details.localPosition.dx, details.localPosition.dy + topPadding);
       _showCursor = true;
     });
 
@@ -236,18 +176,20 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     });
   }
 
-  void _onPanStart(DragStartDetails details, Size screenSize, ScreenInfo? screenInfo) {
+  void _onPanStart(dynamic details, Size screenSize, ScreenInfo? screenInfo) {
     if (screenInfo == null || !_mouseMode) return;
 
-    _lastFocalPoint = details.localPosition;
+    final localPos = details.localFocalPoint ?? details.localPosition;
+    _lastFocalPoint = localPos;
 
-    // カーソル位置を更新
+    // カーソル位置を更新（topPaddingを加算）
+    final topPadding = MediaQuery.of(context).padding.top + 80;
     setState(() {
-      _cursorPosition = details.localPosition;
+      _cursorPosition = Offset(localPos.dx, localPos.dy + topPadding);
       _showCursor = true;
     });
 
-    final remotePos = _screenToRemoteCoordinates(details.localPosition, screenSize, screenInfo);
+    final remotePos = _screenToRemoteCoordinates(localPos, screenSize, screenInfo);
 
     if (_dragMode) {
       // ドラッグモード: マウスダウン
@@ -265,15 +207,18 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     }
   }
 
-  void _onPanUpdate(DragUpdateDetails details, Size screenSize, ScreenInfo? screenInfo) {
+  void _onPanUpdate(dynamic details, Size screenSize, ScreenInfo? screenInfo) {
     if (screenInfo == null || !_mouseMode) return;
 
-    // カーソル位置を更新
+    final localPos = details.localFocalPoint ?? details.localPosition;
+
+    // カーソル位置を更新（topPaddingを加算）
+    final topPadding = MediaQuery.of(context).padding.top + 80;
     setState(() {
-      _cursorPosition = details.localPosition;
+      _cursorPosition = Offset(localPos.dx, localPos.dy + topPadding);
     });
 
-    final remotePos = _screenToRemoteCoordinates(details.localPosition, screenSize, screenInfo);
+    final remotePos = _screenToRemoteCoordinates(localPos, screenSize, screenInfo);
 
     // 常にマウス移動を送信
     ref.read(webSocketProvider.notifier).sendMouseMove(
@@ -281,10 +226,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       remotePos.dy.toInt(),
     );
 
-    _lastFocalPoint = details.localPosition;
+    _lastFocalPoint = localPos;
   }
 
-  void _onPanEnd(DragEndDetails details, Size screenSize, ScreenInfo? screenInfo) {
+  void _onPanEnd(dynamic details, Size screenSize, ScreenInfo? screenInfo) {
     if (screenInfo == null || !_mouseMode) return;
 
     if (_dragMode && _isDragging) {
@@ -308,99 +253,144 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     });
   }
 
-  /// 画面座標（ビューポート）をコンテンツ座標（画像ピクセル）に変換
-  Offset _getTransformedPosition(Offset viewportPosition) {
-    final matrix = _transformController.value;
+  // 2本指スクロール処理（画像をパン）
+  void _onTwoFingerScroll(Offset delta, Size displaySize, double actualImageHeight) {
+    setState(() {
+      // 新しいオフセットを計算
+      var newOffset = _imageScrollOffset + delta;
 
-    // 逆行列を計算
-    final inverseMatrix = Matrix4.inverted(matrix);
+      // 縦方向の制限（画像が表示エリアより大きい場合のみスクロール可能）
+      if (actualImageHeight > displaySize.height) {
+        final maxScrollY = actualImageHeight - displaySize.height;
+        newOffset = Offset(
+          0, // 横スクロールは無効
+          newOffset.dy.clamp(-maxScrollY, 0),
+        );
+      } else {
+        newOffset = Offset.zero;
+      }
 
-    // Vector3を使って正確に変換
-    final inputVector = vector_math.Vector3(
-      viewportPosition.dx,
-      viewportPosition.dy,
-      0,
-    );
-    final outputVector = inverseMatrix.transform3(inputVector);
+      _imageScrollOffset = newOffset;
+    });
+  }
 
-    return Offset(outputVector.x, outputVector.y);
+  /// スクロール停止時の処理（高画質リクエストは廃止、シンプルにスクロール停止を待つだけ）
+  void _scheduleHighQualityRequest(Size screenSize) {
+    // 何もしない（PC側は常に同じ品質でキャプチャ）
+    // 将来的に必要であれば、ここで高画質リクエストを送信
+  }
+
+  // 画像の実際の表示高さを計算
+  double _calculateImageDisplayHeight(Uint8List imageData, double displayWidth) {
+    // JPEG/PNGヘッダーから画像サイズを取得（簡易版）
+    // JPEGの場合: FFD8で始まる
+    // PNGの場合: 89504E47で始まる
+    try {
+      if (imageData.length > 24) {
+        // PNGの場合
+        if (imageData[0] == 0x89 && imageData[1] == 0x50) {
+          // PNG IHDR chunk (width at offset 16-19, height at 20-23)
+          final width = (imageData[16] << 24) | (imageData[17] << 16) | (imageData[18] << 8) | imageData[19];
+          final height = (imageData[20] << 24) | (imageData[21] << 16) | (imageData[22] << 8) | imageData[23];
+          if (width > 0 && height > 0) {
+            final scale = displayWidth / width;
+            return height * scale;
+          }
+        }
+        // JPEGの場合 - SOF0/SOF2マーカーを探す
+        else if (imageData[0] == 0xFF && imageData[1] == 0xD8) {
+          for (int i = 2; i < imageData.length - 10; i++) {
+            if (imageData[i] == 0xFF && (imageData[i + 1] == 0xC0 || imageData[i + 1] == 0xC2)) {
+              final height = (imageData[i + 5] << 8) | imageData[i + 6];
+              final width = (imageData[i + 7] << 8) | imageData[i + 8];
+              if (width > 0 && height > 0) {
+                final scale = displayWidth / width;
+                return height * scale;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // エラー時はデフォルト値を返す
+    }
+    // デフォルト: 16:9アスペクト比を仮定
+    return displayWidth * 9 / 16;
+  }
+
+  Offset _getTransformedPosition(Offset localPosition) {
+    // InteractiveViewerを削除したため、変換不要
+    return localPosition;
   }
 
   // 画面タッチ位置からリモートPC座標に変換
-  // ヘッダーは別のContainerにあるため、screenPosはStack内の座標（0,0から始まる）
+  // スクロールオフセットとスケールを考慮
   Offset _screenToRemoteCoordinates(Offset screenPos, Size screenSize, ScreenInfo screenInfo) {
+    // スクロールオフセットを考慮した画像内座標
+    // _imageScrollOffset は負の値（スクロール = 画像が移動）
+    final imageX = screenPos.dx - _imageScrollOffset.dx;
+    final imageY = screenPos.dy - _imageScrollOffset.dy;
+
     if (_focusedWindow != null) {
-      // アプリ選択時: InteractiveViewerの逆変換を適用
-      final contentPos = _getTransformedPosition(screenPos);
+      // フォーカスモード
       final window = _focusedWindow!;
+      final pixelCount = window.width * window.height;
 
-      // サーバーから送られる画像は等倍（ウィンドウサイズと同じ）
-      final imageWidth = window.width.toDouble();
-      final imageHeight = window.height.toDouble();
+      // 送信される画像サイズを計算
+      double sentWidth, sentHeight;
+      if (pixelCount > 600000) {
+        sentWidth = window.width / 2.0;
+        sentHeight = window.height / 2.0;
+      } else {
+        sentWidth = window.width.toDouble();
+        sentHeight = window.height.toDouble();
+      }
 
-      // 画像ピクセル座標から相対位置を計算
-      final relativeX = (contentPos.dx / imageWidth).clamp(0.0, 1.0);
-      final relativeY = (contentPos.dy / imageHeight).clamp(0.0, 1.0);
+      // 表示サイズを計算（高さに合わせてスケール）
+      double displayScale = 1.0;
+      if (sentHeight < screenSize.height) {
+        displayScale = screenSize.height / sentHeight;
+      }
 
-      // PC座標に変換（ウィンドウ内の相対位置 + ウィンドウのオフセット）
-      final remoteX = relativeX * window.width + window.x;
-      final remoteY = relativeY * window.height + window.y;
+      // 表示座標 → 送信画像座標 → リモート座標
+      final sentImageX = imageX / displayScale;
+      final sentImageY = imageY / displayScale;
 
-      print('[Coords-Focused] screenPos=$screenPos, contentPos=$contentPos');
-      print('[Coords-Focused] window: ${window.x},${window.y} ${window.width}x${window.height}');
-      print('[Coords-Focused] rel=($relativeX,$relativeY), PC=($remoteX,$remoteY)');
-      print('[Coords-Focused] transform: ${_transformController.value}');
+      double remoteX, remoteY;
+      if (pixelCount > 600000) {
+        // Large window: 送信サイズの2倍がウィンドウサイズ
+        remoteX = sentImageX * 2.0 + window.x;
+        remoteY = sentImageY * 2.0 + window.y;
+      } else {
+        // Small/Medium window: 送信サイズ = ウィンドウサイズ
+        remoteX = sentImageX + window.x;
+        remoteY = sentImageY + window.y;
+      }
 
       return Offset(
         remoteX.clamp(0, screenInfo.width.toDouble()),
         remoteY.clamp(0, screenInfo.height.toDouble()),
       );
     } else {
-      // アプリ未選択時: BoxFit.contain表示の座標計算
-      final imageWidth = screenInfo.width / 2.0;
-      final imageHeight = screenInfo.height / 2.0;
+      // 通常モード: PC画面全体を1/2サイズで表示
+      // 画像座標をPC座標に変換（2倍にスケールアップ）
+      final remoteX = imageX * 2.0;
+      final remoteY = imageY * 2.0;
 
-      // BoxFit.containで表示される実際のサイズとオフセットを計算
-      final imageAspect = imageWidth / imageHeight;
-      final screenAspect = screenSize.width / screenSize.height;
-
-      double displayWidth, displayHeight, offsetX, offsetY;
-      if (imageAspect > screenAspect) {
-        displayWidth = screenSize.width;
-        displayHeight = screenSize.width / imageAspect;
-        offsetX = 0;
-        offsetY = (screenSize.height - displayHeight) / 2;
-      } else {
-        displayHeight = screenSize.height;
-        displayWidth = screenSize.height * imageAspect;
-        offsetX = (screenSize.width - displayWidth) / 2;
-        offsetY = 0;
-      }
-
-      // タップ位置から画像内の相対位置を計算
-      final tapX = (screenPos.dx - offsetX).clamp(0.0, displayWidth);
-      final tapY = (screenPos.dy - offsetY).clamp(0.0, displayHeight);
-
-      final relativeX = tapX / displayWidth;
-      final relativeY = tapY / displayHeight;
-
-      // PC座標に変換
-      final remoteX = relativeX * screenInfo.width;
-      final remoteY = relativeY * screenInfo.height;
-
-      print('[Coords-Full] screenPos=$screenPos, display=${displayWidth}x$displayHeight, offset=($offsetX,$offsetY), rel=($relativeX,$relativeY), PC=($remoteX,$remoteY)');
-
-      return Offset(remoteX, remoteY);
+      return Offset(
+        remoteX.clamp(0, screenInfo.width.toDouble()),
+        remoteY.clamp(0, screenInfo.height.toDouble()),
+      );
     }
   }
 
-  // PCのマウス座標を画像内のピクセル座標に変換（InteractiveViewer内で使用）
+  // PCのマウス座標を画像内のピクセル座標に変換（横幅100%表示用）
   Offset? _convertPcMouseToImageCoordinates(MousePosition? pcMouse, ScreenInfo? screenInfo) {
     if (pcMouse == null || screenInfo == null) return null;
 
     // フォーカスモードかどうかで処理を分岐
     if (_focusedWindow != null) {
-      // フォーカスモード: 画像はウィンドウ領域のみ（クロップ、縮小なし）
+      // フォーカスモード: ウィンドウ領域のみ表示（原寸）
       final window = _focusedWindow!;
 
       // PCマウスがウィンドウ領域外にある場合はnull
@@ -409,14 +399,14 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         return null;
       }
 
-      // ウィンドウ内のピクセル座標
+      // ウィンドウ内のピクセル座標（原寸なのでそのまま）
       final imageX = (pcMouse.x - window.x).toDouble();
       final imageY = (pcMouse.y - window.y).toDouble();
 
       return Offset(imageX, imageY);
     } else {
-      // 通常モード: 画面は1/2サイズで縮小されている
-      // PCの座標を1/2にして画像内の座標に変換
+      // 通常モード: PC画面全体を1/2サイズで表示
+      // PC座標を画像座標に変換（1/2スケール）
       final imageX = pcMouse.x / 2.0;
       final imageY = pcMouse.y / 2.0;
 
@@ -508,35 +498,48 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   void _zoomToWindow(AppWindowInfo windowInfo, Size screenSize, ScreenInfo? screenInfo) {
     if (screenInfo == null) return;
 
+    print('[ZoomToWindow] === START ===');
+    print('[ZoomToWindow] App: ${windowInfo.appName}');
+    print('[ZoomToWindow] Window: x=${windowInfo.x}, y=${windowInfo.y}, ${windowInfo.width}x${windowInfo.height}');
+    print('[ZoomToWindow] ScreenSize: ${screenSize.width}x${screenSize.height}');
+
+    // 小さすぎるウィンドウはスキップ（サイドバーや補助ウィンドウの可能性）
+    if (windowInfo.width < 100 || windowInfo.height < 100) {
+      print('[ZoomToWindow] Window too small, skipping');
+      return;
+    }
+
     setState(() {
       _focusedWindow = windowInfo;
+      _imageScrollOffset = Offset.zero; // スクロールをリセット
     });
 
-    // サーバーに高解像度キャプチャ領域を設定
-    // ウィンドウ領域だけをキャプチャするよう指示
+    // ウィンドウ全体をキャプチャ（スマホでスクロールして閲覧）
+    int captureX = windowInfo.x;
+    int captureY = windowInfo.y;
+    int captureWidth = windowInfo.width;
+    int captureHeight = windowInfo.height;
+
+    print('[ZoomToWindow] Capture region: x=$captureX, y=$captureY, ${captureWidth}x$captureHeight (full window)');
+
+    // キャプチャ領域を設定（リサイズなし、即時反映）
     ref.read(webSocketProvider.notifier).setCaptureRegion(
-      windowInfo.x,
-      windowInfo.y,
-      windowInfo.width,
-      windowInfo.height,
+      captureX,
+      captureY,
+      captureWidth,
+      captureHeight,
     );
-
-    // ウィジェット再構築後に3倍ズームを適用
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _transformController.value = Matrix4.identity()..scale(_fixedZoom);
-    });
   }
 
   // ズームをリセット（全画面キャプチャに戻す）
   void _resetZoom() {
     setState(() {
       _focusedWindow = null;
+      _imageScrollOffset = Offset.zero; // スクロールもリセット
     });
 
     // サーバーに全画面キャプチャに戻すよう指示
     ref.read(webSocketProvider.notifier).resetCaptureRegion();
-
-    _transformController.value = Matrix4.identity();
   }
 
   @override
@@ -551,376 +554,479 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       });
     }
 
-    final l10n = ref.watch(l10nProvider);
+    // ヘッダー用の上部スペース（SafeArea + ヘッダー高さ）
+    final topPadding = MediaQuery.of(context).padding.top + 80;
+    // 画面表示エリアの固定高さ
+    const double screenDisplayHeight = 380;
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Column(
+      body: Stack(
         children: [
-          // 上部ヘッダー（重ならない）
-          Container(
-            color: Colors.black,
-            child: SafeArea(
-              bottom: false,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // 上段: 戻るボタン、ステータス、更新
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          // 画面表示（固定高さ）
+          if (state.currentFrame != null)
+            Positioned(
+              top: topPadding,
+              left: 0,
+              right: 0,
+              height: screenDisplayHeight,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final screenSize = Size(constraints.maxWidth, screenDisplayHeight);
+
+                  // 画像サイズを計算
+                  // デスクトップは600,000ピクセル以上のウィンドウを1/2サイズで送信
+                  double imageWidth, imageHeight;
+                  if (_focusedWindow != null) {
+                    final pixelCount = _focusedWindow!.width * _focusedWindow!.height;
+                    if (pixelCount > 600000) {
+                      // Large window: 1/2サイズで送信される
+                      imageWidth = _focusedWindow!.width / 2.0;
+                      imageHeight = _focusedWindow!.height / 2.0;
+                    } else {
+                      // Small/Medium window: 原寸で送信される
+                      imageWidth = _focusedWindow!.width.toDouble();
+                      imageHeight = _focusedWindow!.height.toDouble();
+                    }
+                    // 画像が表示エリアより小さい場合はスケールアップ
+                    if (imageHeight < screenDisplayHeight) {
+                      final scale = screenDisplayHeight / imageHeight;
+                      imageWidth = imageWidth * scale;
+                      imageHeight = screenDisplayHeight;
+                    }
+                  } else {
+                    // 通常モード: PC画面の1/2サイズ
+                    imageWidth = (state.screenInfo?.width ?? 1920) / 2.0;
+                    imageHeight = (state.screenInfo?.height ?? 1080) / 2.0;
+                  }
+
+                  // スクロール可能な最大量（画像が画面より大きい場合のみスクロール可能）
+                  final maxScrollX = (imageWidth - screenSize.width).clamp(0.0, double.infinity);
+                  final maxScrollY = (imageHeight - screenDisplayHeight).clamp(0.0, double.infinity);
+
+                  // ウィンドウモード: 横スクロールはローカル（画面パン）、縦スクロールはPC
+                  // 通常モード: 両方ローカルスクロール
+                  final clampedScrollOffset = Offset(
+                    _imageScrollOffset.dx.clamp(-maxScrollX, 0.0),
+                    _focusedWindow != null
+                        ? 0.0  // ウィンドウモードでは縦スクロールはPC側
+                        : _imageScrollOffset.dy.clamp(-maxScrollY, 0.0),
+                  );
+
+                  return GestureDetector(
+                    onTapDown: (details) => _onTapDown(details, screenSize, state.screenInfo),
+                    onLongPressStart: (details) => _onLongPress(details, screenSize, state.screenInfo),
+                    onScaleStart: (details) {
+                      _pointerCount = details.pointerCount;
+                      _lastScrollPosition = details.focalPoint;
+                      if (details.pointerCount == 1) {
+                        _onPanStart(details, screenSize, state.screenInfo);
+                      }
+                    },
+                    onScaleUpdate: (details) {
+                      if (details.pointerCount >= 2) {
+                        // 2本指スクロール → PC側に直接送信（シンプル化）
+                        final delta = details.focalPoint - _lastScrollPosition;
+                        _lastScrollPosition = details.focalPoint;
+
+                        if (_focusedWindow != null) {
+                          // 横方向: ローカルパン（画面内を移動）
+                          final currentDx = _imageScrollOffset.dx;
+                          final newDx = currentDx + delta.dx;
+                          final clampedDx = newDx.clamp(-maxScrollX, 0.0);
+                          print('[HorizontalPan] delta.dx=${delta.dx.toStringAsFixed(1)}, currentDx=${currentDx.toStringAsFixed(1)}, newDx=${newDx.toStringAsFixed(1)}, maxScrollX=${maxScrollX.toStringAsFixed(1)}, clampedDx=${clampedDx.toStringAsFixed(1)}');
+                          setState(() {
+                            _imageScrollOffset = Offset(
+                              clampedDx,
+                              _imageScrollOffset.dy,
+                            );
+                          });
+
+                          // 縦方向: PC側にスクロールを送信
+                          // スクロール位置をリモート座標に変換してマウスを移動
+                          final scrollPos = _screenToRemoteCoordinates(
+                            details.localFocalPoint,
+                            screenSize,
+                            state.screenInfo!,
+                          );
+                          ref.read(webSocketProvider.notifier).sendMouseMove(
+                            scrollPos.dx.toInt(),
+                            scrollPos.dy.toInt(),
+                          );
+
+                          // Y方向のスクロール量をPC側に送信
+                          // 指を上に動かす → 下を見る（コンテンツを上にスクロール）
+                          // delta.dyを反転してナチュラルスクロールに
+                          final scrollAmount = (-delta.dy * 5).toInt(); // 感度調整 + 方向反転
+                          if (scrollAmount.abs() > 5) {
+                            ref.read(webSocketProvider.notifier).sendScroll(0, scrollAmount);
+                          }
+                        } else {
+                          // 通常モード: ローカルスクロール
+                          final currentDx = _imageScrollOffset.dx;
+                          final currentDy = _imageScrollOffset.dy;
+                          final newDx = currentDx + delta.dx;
+                          final newDy = currentDy + delta.dy;
+                          setState(() {
+                            _imageScrollOffset = Offset(
+                              newDx.clamp(-maxScrollX, 0),
+                              newDy.clamp(-maxScrollY, 0),
+                            );
+                          });
+                        }
+                      } else if (_pointerCount == 1) {
+                        // 1本指はマウス操作
+                        _onPanUpdate(details, screenSize, state.screenInfo);
+                      }
+                    },
+                    onScaleEnd: (details) {
+                      if (_pointerCount == 1) {
+                        _onPanEnd(details, screenSize, state.screenInfo);
+                      }
+                      _pointerCount = 0;
+                    },
+                    child: Container(
+                      width: screenSize.width,
+                      height: screenDisplayHeight,
+                      clipBehavior: Clip.hardEdge,
+                      decoration: const BoxDecoration(),
+                      child: Stack(
+                        children: [
+                          Positioned(
+                            left: clampedScrollOffset.dx,
+                            top: clampedScrollOffset.dy,
+                            width: imageWidth,
+                            height: imageHeight,
+                            child: Image.memory(
+                              state.currentFrame!,
+                              gaplessPlayback: true,
+                              fit: BoxFit.fill,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+          )
+          else
+            const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(color: Color(0xFFe94560)),
+                  SizedBox(height: 16),
+                  Text(
+                    '画面を読み込み中...',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+
+          // PCマウスカーソル表示（画像の上にオーバーレイ）
+          if (state.currentFrame != null && _mouseMode && state.pcMousePosition != null)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 80,
+              left: 0,
+              right: 0,
+              height: screenDisplayHeight,
+              child: IgnorePointer(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final screenSize = Size(constraints.maxWidth, screenDisplayHeight);
+                    final pcMouse = state.pcMousePosition!;
+
+                    // PCマウス座標を画面座標に変換（スケールとスクロールオフセット考慮）
+                    double cursorX, cursorY;
+                    if (_focusedWindow != null) {
+                      final window = _focusedWindow!;
+                      final pixelCount = window.width * window.height;
+                      if (pixelCount > 600000) {
+                        // Large window: 1/2サイズで表示
+                        cursorX = (pcMouse.x - window.x) / 2.0 + _imageScrollOffset.dx;
+                        cursorY = (pcMouse.y - window.y) / 2.0 + _imageScrollOffset.dy;
+                      } else {
+                        // Small/Medium window: 原寸
+                        cursorX = (pcMouse.x - window.x) + _imageScrollOffset.dx;
+                        cursorY = (pcMouse.y - window.y) + _imageScrollOffset.dy;
+                      }
+                    } else {
+                      // 通常モード: PC座標/2（1/2サイズ画像）+ スクロールオフセット
+                      cursorX = (pcMouse.x / 2.0) + _imageScrollOffset.dx;
+                      cursorY = (pcMouse.y / 2.0) + _imageScrollOffset.dy;
+                    }
+
+                    // カーソルが表示範囲外なら表示しない
+                    if (cursorX < 0 || cursorX > screenSize.width ||
+                        cursorY < 0 || cursorY > screenDisplayHeight) {
+                      return const SizedBox.shrink();
+                    }
+
+                    return Stack(
                       children: [
-                        // 戻るボタン
-                        IconButton(
-                          icon: const Icon(Icons.arrow_back, color: Colors.white),
-                          onPressed: () {
-                            _stopScreenShare();
-                            context.go('/commands');
-                          },
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                        // ステータスインジケーター
-                        Row(
-                          children: [
-                            // 接続状態
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                color: state.currentFrame != null ? Colors.green : Colors.orange,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              '${state.screenInfo?.width ?? 0}x${state.screenInfo?.height ?? 0}',
-                              style: const TextStyle(color: Colors.white70, fontSize: 12),
-                            ),
-                            const SizedBox(width: 12),
-                            // モードインジケーター
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: _mouseMode
-                                    ? const Color(0xFFe94560).withValues(alpha: 0.3)
-                                    : Colors.white.withValues(alpha: 0.2),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    _mouseMode ? Icons.mouse : Icons.visibility,
-                                    color: _mouseMode ? const Color(0xFFe94560) : Colors.white70,
-                                    size: 12,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    _mouseMode ? l10n.mouse : l10n.view,
-                                    style: TextStyle(
-                                      color: _mouseMode ? const Color(0xFFe94560) : Colors.white70,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        // 更新ボタン
-                        IconButton(
-                          icon: const Icon(Icons.refresh, color: Colors.white),
-                          onPressed: () {
-                            ref.read(webSocketProvider.notifier).getRunningApps();
-                          },
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
+                        Positioned(
+                          left: cursorX - 1,
+                          top: cursorY - 1,
+                          child: CustomPaint(
+                            size: const Size(20, 24),
+                            painter: _CursorPainter(),
+                          ),
                         ),
                       ],
-                    ),
-                    // 下段: 操作ガイド（マウスモード時のみ表示）
-                    if (_mouseMode)
-                      Container(
-                        margin: const EdgeInsets.only(top: 4),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.4),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _operationHint(Icons.touch_app, _dragMode ? l10n.swipeToDrag : l10n.tapToMove),
-                            const SizedBox(width: 12),
-                            _operationHint(Icons.ads_click, l10n.doubleTapToClick),
-                            const SizedBox(width: 12),
-                            _operationHint(Icons.pan_tool, l10n.longPressForRightClick),
-                          ],
-                        ),
-                      ),
-                  ],
+                    );
+                  },
                 ),
               ),
             ),
-          ),
-          // 画面表示エリア
-          Expanded(
-            child: Stack(
-              children: [
-                // 画面表示
-                if (state.currentFrame != null)
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final screenSize = Size(constraints.maxWidth, constraints.maxHeight);
-                      return Listener(
-                        onPointerDown: (event) {
-                          setState(() {
-                            _pointerCount++;
-                            if (_pointerCount == 2) {
-                              _lastScrollPosition = event.position;
-                              _isScrolling = true;
-                            }
-                          });
-                        },
-                        onPointerUp: (event) {
-                          setState(() {
-                            _pointerCount = (_pointerCount - 1).clamp(0, 10);
-                            if (_pointerCount < 2) {
-                              _isScrolling = false;
-                              _lastScrollPosition = null;
-                            }
-                          });
-                        },
-                        onPointerCancel: (event) {
-                          setState(() {
-                            _pointerCount = (_pointerCount - 1).clamp(0, 10);
-                            if (_pointerCount < 2) {
-                              _isScrolling = false;
-                              _lastScrollPosition = null;
-                            }
-                          });
-                        },
-                        onPointerMove: (event) {
-                          if (_isScrolling && _pointerCount >= 2 && _lastScrollPosition != null) {
-                            final delta = event.position - _lastScrollPosition!;
-                            final scrollDeltaY = (-delta.dy * 2).toInt();
-                            final scrollDeltaX = (-delta.dx * 2).toInt();
-                            if (scrollDeltaY.abs() > 2 || scrollDeltaX.abs() > 2) {
-                              ref.read(webSocketProvider.notifier).sendScroll(scrollDeltaX, scrollDeltaY);
-                              _lastScrollPosition = event.position;
-                            }
-                          }
-                        },
-                        child: GestureDetector(
-                          onTapDown: (details) => _onTapDown(details, screenSize, state.screenInfo),
-                          onLongPressStart: (details) => _onLongPress(details, screenSize, state.screenInfo),
-                          child: _focusedWindow != null
-                            // アプリ選択時: 3倍ズームでパン可能
-                            ? ClipRect(
-                                child: InteractiveViewer(
-                                  transformationController: _transformController,
-                                  constrained: false,
-                                  boundaryMargin: const EdgeInsets.all(double.infinity),
-                                  minScale: 0.5,
-                                  maxScale: 10.0,
-                                  panEnabled: true,
-                                  scaleEnabled: false,
-                                  child: Image.memory(
-                                    state.currentFrame!,
-                                    fit: BoxFit.none,
-                                    gaplessPlayback: true,
-                                  ),
-                                ),
-                              )
-                            // アプリ未選択時: 全体表示（フィット）
-                            : Image.memory(
-                                state.currentFrame!,
-                                fit: BoxFit.contain,
-                                width: screenSize.width,
-                                height: screenSize.height,
-                                gaplessPlayback: true,
-                              ),
-                        ),
-                      );
-                    },
-                  )
-                else
-                  Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const CircularProgressIndicator(color: Color(0xFFe94560)),
-                        const SizedBox(height: 16),
-                        Text(
-                          l10n.loadingScreen,
-                          style: const TextStyle(color: Colors.white70),
-                        ),
+
+          // タッチカーソル表示
+          if (_showCursor && _cursorPosition != null)
+            Positioned(
+              left: _cursorPosition!.dx - 12,
+              top: _cursorPosition!.dy - 12,
+              child: IgnorePointer(
+                child: Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.3),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFe94560), width: 2),
+                  ),
+                  child: const Center(
+                    child: Icon(
+                      Icons.touch_app,
+                      color: Color(0xFFe94560),
+                      size: 14,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // 上部コントロールバー
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Consumer(
+              builder: (context, ref, _) {
+                final l10n = ref.watch(l10nProvider);
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.85),
+                        Colors.transparent,
                       ],
                     ),
                   ),
-
-                // タッチカーソル表示
-                if (_showCursor && _cursorPosition != null)
-                  Positioned(
-                    left: _cursorPosition!.dx - 12,
-                    top: _cursorPosition!.dy - 12,
-                    child: IgnorePointer(
-                      child: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.3),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: const Color(0xFFe94560), width: 2),
+                  child: SafeArea(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // 上段: 戻るボタン、ステータス、更新
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            // 戻るボタン
+                            IconButton(
+                              icon: const Icon(Icons.arrow_back, color: Colors.white),
+                              onPressed: () {
+                                _stopScreenShare();
+                                context.go('/commands');
+                              },
+                            ),
+                            // ステータスインジケーター
+                            Row(
+                              children: [
+                                // 接続状態
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: state.currentFrame != null ? Colors.green : Colors.orange,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${state.screenInfo?.width ?? 0}x${state.screenInfo?.height ?? 0}',
+                                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                ),
+                                const SizedBox(width: 12),
+                                // モードインジケーター
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: _mouseMode
+                                        ? const Color(0xFFe94560).withValues(alpha: 0.3)
+                                        : Colors.white.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        _mouseMode ? Icons.mouse : Icons.visibility,
+                                        color: _mouseMode ? const Color(0xFFe94560) : Colors.white70,
+                                        size: 12,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        _mouseMode ? l10n.mouse : l10n.view,
+                                        style: TextStyle(
+                                          color: _mouseMode ? const Color(0xFFe94560) : Colors.white70,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
-                        child: const Center(
-                          child: Icon(
-                            Icons.touch_app,
-                            color: Color(0xFFe94560),
-                            size: 14,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-
-                // 下部ツールバー（キーボード非表示時のみ）
-                if (!_showKeyboardInput)
-                  Positioned(
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    child: Consumer(
-                      builder: (context, ref, _) {
-                        final l10n = ref.watch(l10nProvider);
-                        return Container(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.bottomCenter,
-                              end: Alignment.topCenter,
-                              colors: [
-                                Colors.black.withValues(alpha: 0.9),
-                                Colors.transparent,
+                        // 下段: 操作ガイド（マウスモード時のみ表示）
+                        if (_mouseMode)
+                          Container(
+                            margin: const EdgeInsets.only(top: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.4),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _operationHint(Icons.touch_app, _dragMode ? l10n.swipeToDrag : l10n.tapToMove),
+                                const SizedBox(width: 12),
+                                _operationHint(Icons.ads_click, l10n.doubleTapToClick),
+                                const SizedBox(width: 12),
+                                _operationHint(Icons.pan_tool, l10n.longPressForRightClick),
                               ],
                             ),
                           ),
-                          child: SafeArea(
-                            top: false,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                              child: LayoutBuilder(
-                                builder: (context, constraints) {
-                                  final screenSize = Size(constraints.maxWidth, MediaQuery.of(context).size.height);
-                                  return SingleChildScrollView(
-                                    scrollDirection: Axis.horizontal,
-                                    child: Row(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        // アプリ切り替え
-                                        _toolbarButton(
-                                          icon: Icons.apps,
-                                          label: l10n.apps,
-                                          onTap: () => _showAppsSheet(state.runningApps, screenSize, state.screenInfo),
-                                        ),
-                                        // マウスモード切り替え
-                                        _toolbarToggleButton(
-                                          icon: Icons.mouse,
-                                          label: _mouseMode ? l10n.mouse : l10n.view,
-                                          isActive: _mouseMode,
-                                          onTap: () {
-                                            setState(() {
-                                              _mouseMode = !_mouseMode;
-                                            });
-                                            // モード切り替え時に触覚フィードバック
-                                            HapticFeedback.lightImpact();
-                                          },
-                                        ),
-                                        // ドラッグモード切り替え（マウスモード時のみ有効）
-                                        if (_mouseMode)
-                                          _toolbarToggleButton(
-                                            icon: Icons.pan_tool,
-                                            label: _dragMode ? l10n.drag : l10n.move,
-                                            isActive: _dragMode,
-                                            onTap: () {
-                                              setState(() {
-                                                _dragMode = !_dragMode;
-                                              });
-                                              HapticFeedback.lightImpact();
-                                              // モード変更をユーザーに通知
-                                              ScaffoldMessenger.of(context).showSnackBar(
-                                                SnackBar(
-                                                  content: Text(_dragMode
-                                                      ? l10n.dragModeOn
-                                                      : l10n.moveModeOn),
-                                                  duration: const Duration(seconds: 2),
-                                                  backgroundColor: const Color(0xFF16213e),
-                                                ),
-                                              );
-                                            },
-                                          ),
-                                        // ズームリセット or Finder
-                                        if (_focusedWindow != null)
-                                          _toolbarButton(
-                                            icon: Icons.zoom_out_map,
-                                            label: l10n.reset,
-                                            onTap: _resetZoom,
-                                          )
-                                        else
-                                          _toolbarButton(
-                                            icon: Icons.folder,
-                                            label: l10n.finder,
-                                            onTap: () => _showFinderSheet(),
-                                          ),
-                                        // 閉じる（Cmd+W）
-                                        _toolbarButton(
-                                          icon: Icons.close,
-                                          label: l10n.closeWindow,
-                                          onTap: () {
-                                            ref.read(webSocketProvider.notifier).closeWindow();
-                                          },
-                                        ),
-                                        // キーボード
-                                        _toolbarButton(
-                                          icon: Icons.keyboard,
-                                          label: l10n.keyboard,
-                                          onTap: () {
-                                            setState(() {
-                                              _showKeyboardInput = !_showKeyboardInput;
-                                              if (_showKeyboardInput) {
-                                                _textFocusNode.requestFocus();
-                                              }
-                                            });
-                                          },
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                        );
-                      },
+                      ],
                     ),
                   ),
-
-                // インライン入力フィールド（ツールバーを非表示にして全画面活用）
-                if (_showKeyboardInput)
-                  Positioned(
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    child: SafeArea(
-                      top: false,
-                      child: _buildInlineKeyboardInput(),
-                    ),
-                  ),
-              ],
+                );
+              },
             ),
           ),
+
+          // 下部ツールバー（キーボード入力時は非表示）
+          if (!_showKeyboardInput)
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Consumer(
+              builder: (context, ref, _) {
+                final l10n = ref.watch(l10nProvider);
+                return Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.9),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                  child: SafeArea(
+                    top: false,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          // 画面表示エリアの固定高さを使用（screenDisplayHeight = 380）
+                          final screenSize = Size(constraints.maxWidth, screenDisplayHeight);
+                          return SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                // アプリ切り替え
+                                _toolbarButton(
+                                  icon: Icons.apps,
+                                  label: l10n.apps,
+                                  onTap: () => _showAppsSheet(state.runningApps, screenSize, state.screenInfo),
+                                ),
+                                // マウスモード切り替え
+                                _toolbarToggleButton(
+                                  icon: Icons.mouse,
+                                  label: _mouseMode ? l10n.mouse : l10n.view,
+                                  isActive: _mouseMode,
+                                  onTap: () {
+                                    setState(() {
+                                      _mouseMode = !_mouseMode;
+                                    });
+                                    // モード切り替え時に触覚フィードバック
+                                    HapticFeedback.lightImpact();
+                                  },
+                                ),
+                                // ズームリセット or Finder
+                                if (_focusedWindow != null)
+                                  _toolbarButton(
+                                    icon: Icons.zoom_out_map,
+                                    label: l10n.reset,
+                                    onTap: _resetZoom,
+                                  )
+                                else
+                                  _toolbarButton(
+                                    icon: Icons.folder,
+                                    label: l10n.finder,
+                                    onTap: () => _showFinderSheet(),
+                                  ),
+                                // 閉じる（Cmd+W）
+                                _toolbarButton(
+                                  icon: Icons.close,
+                                  label: l10n.closeWindow,
+                                  onTap: () {
+                                    ref.read(webSocketProvider.notifier).closeWindow();
+                                  },
+                                ),
+                                // キーボード
+                                _toolbarButton(
+                                  icon: Icons.keyboard,
+                                  label: l10n.keyboard,
+                                  onTap: () {
+                                    setState(() {
+                                      _showKeyboardInput = !_showKeyboardInput;
+                                      if (_showKeyboardInput) {
+                                        _textFocusNode.requestFocus();
+                                      }
+                                    });
+                                  },
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+
+          // インライン入力フィールド（ツールバーの代わりに表示）
+          if (_showKeyboardInput)
+            Positioned(
+              bottom: MediaQuery.of(context).padding.bottom,
+              left: 0,
+              right: 0,
+              child: _buildInlineKeyboardInput(),
+            ),
         ],
       ),
     );
@@ -928,7 +1034,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
   Widget _buildInlineKeyboardInput() {
     final state = ref.read(webSocketProvider);
-    final l10n = ref.read(l10nProvider);
     final targetAppName = state.targetApp ??
         state.runningApps.where((app) => app.isActive).firstOrNull?.name;
 
@@ -955,7 +1060,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  targetAppName ?? l10n.unknownApp,
+                  targetAppName ?? '不明なアプリ',
                   style: const TextStyle(
                     color: Color(0xFFe94560),
                     fontSize: 12,
@@ -992,7 +1097,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       ),
                       const SizedBox(width: 4),
                       Text(
-                        _realtimeSync ? l10n.realtimeMode : l10n.manualMode,
+                        _realtimeSync ? 'リアルタイム' : '手動送信',
                         style: TextStyle(
                           color: _realtimeSync ? Colors.green : Colors.white54,
                           fontSize: 10,
@@ -1061,7 +1166,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   focusNode: _textFocusNode,
                   style: const TextStyle(color: Colors.white, fontSize: 16),
                   decoration: InputDecoration(
-                    hintText: _realtimeSync ? l10n.realtimeInputHint : l10n.inputHint,
+                    hintText: _realtimeSync ? '入力するとリアルタイムで反映...' : '入力...',
                     hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
                     filled: true,
                     fillColor: const Color(0xFF1a1a2e),
@@ -1124,154 +1229,28 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          // ショートカット・カスタムコマンド（スクロール可能）
+          // ショートカット（横スクロール1行）
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                // 基本キー
+                // 特殊キー
                 _compactKeyButton('Tab', 'tab'),
+                _compactKeyButton('⇧Tab', 'shift+tab'),
                 _compactKeyButton('Esc', 'escape'),
                 _compactKeyButton('⌫', 'backspace'),
-                const SizedBox(width: 8),
                 // ショートカット
                 _compactKeyButton('⌘C', 'cmd+c'),
                 _compactKeyButton('⌘V', 'cmd+v'),
+                _compactKeyButton('⌘A', 'cmd+a'),
                 _compactKeyButton('⌘Z', 'cmd+z'),
                 _compactKeyButton('⌘S', 'cmd+s'),
-                _compactKeyButton('⌘Tab', 'cmd+tab'),
-                const SizedBox(width: 8),
-                // カスタムコマンド
-                ..._customCommands.asMap().entries.map((entry) {
-                  final index = entry.key;
-                  final cmd = entry.value;
-                  return GestureDetector(
-                    onTap: () => _executeCustomCommand(cmd['command']!),
-                    onLongPress: () => _showDeleteCommandDialog(index, cmd['name']!),
-                    child: Container(
-                      margin: const EdgeInsets.only(right: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.purple.withValues(alpha: 0.3),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: Colors.purple.withValues(alpha: 0.5)),
-                      ),
-                      child: Text(
-                        cmd['name']!,
-                        style: const TextStyle(color: Colors.white, fontSize: 12),
-                      ),
-                    ),
-                  );
-                }),
-                // 追加ボタン
-                GestureDetector(
-                  onTap: _showAddCommandDialog,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.add, color: Colors.white70, size: 14),
-                        SizedBox(width: 2),
-                        Text('+', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                      ],
-                    ),
-                  ),
-                ),
+                // コマンド
+                _commandShortcut('git pull', 'git pull'),
+                _commandShortcut('git push', 'git push'),
+                _commandShortcut('git status', 'git status'),
               ],
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // コマンド追加ダイアログ
-  void _showAddCommandDialog() {
-    final nameController = TextEditingController();
-    final commandController = TextEditingController();
-    final l10n = ref.read(l10nProvider);
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF16213e),
-        title: Text(l10n.addCommand, style: const TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              style: const TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                labelText: l10n.commandName,
-                labelStyle: const TextStyle(color: Colors.white54),
-                hintText: 'git status',
-                hintStyle: const TextStyle(color: Colors.white24),
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: commandController,
-              style: const TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                labelText: l10n.command,
-                labelStyle: const TextStyle(color: Colors.white54),
-                hintText: 'git status',
-                hintStyle: const TextStyle(color: Colors.white24),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.isNotEmpty && commandController.text.isNotEmpty) {
-                _addCustomCommand(nameController.text, commandController.text);
-                Navigator.pop(context);
-              }
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFe94560)),
-            child: Text(l10n.add),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // コマンド削除確認ダイアログ
-  void _showDeleteCommandDialog(int index, String name) {
-    final l10n = ref.read(l10nProvider);
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF16213e),
-        title: Text(l10n.deleteCommand, style: const TextStyle(color: Colors.white)),
-        content: Text(
-          '"$name" ${l10n.deleteConfirm}',
-          style: const TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              _removeCustomCommand(index);
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: Text(l10n.deleteBtn),
           ),
         ],
       ),
@@ -1361,6 +1340,32 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     );
   }
 
+  // コマンドショートカット（テキストを送信してEnter）
+  Widget _commandShortcut(String label, String command) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: () {
+          // コマンドを入力してEnterを送信
+          ref.read(webSocketProvider.notifier).typeText(command);
+          ref.read(webSocketProvider.notifier).pressKey('enter');
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0f3460),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0xFFe94560).withOpacity(0.5)),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(color: Color(0xFFe94560), fontSize: 11),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _toolbarButton({
     required IconData icon,
     required String label,
@@ -1429,7 +1434,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _showAppsSheet(List<RunningApp> apps, Size screenSize, ScreenInfo? screenInfo) {
-    final l10n = ref.read(l10nProvider);
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF16213e),
@@ -1442,9 +1446,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              l10n.runningApps,
-              style: const TextStyle(
+            const Text(
+              '起動中のアプリ',
+              style: TextStyle(
                 color: Colors.white,
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
@@ -1452,12 +1456,12 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             ),
             const SizedBox(height: 16),
             if (apps.isEmpty)
-              Center(
+              const Center(
                 child: Padding(
-                  padding: const EdgeInsets.all(32),
+                  padding: EdgeInsets.all(32),
                   child: Text(
-                    l10n.fetchingApps,
-                    style: const TextStyle(color: Colors.white54),
+                    'アプリを取得中...',
+                    style: TextStyle(color: Colors.white54),
                   ),
                 ),
               )
@@ -1510,8 +1514,13 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       ),
                       onTap: () {
                         Navigator.pop(context);
-                        // まずウィンドウ一覧を取得して表示
-                        _showAppWindowsSheet(app.name, screenSize, screenInfo, isBrowser, isTerminal);
+                        // Messagesアプリの場合は専用のチャット一覧を表示
+                        if (app.name.toLowerCase() == 'messages') {
+                          _showMessagesChatsSheet(screenSize, screenInfo);
+                        } else {
+                          // まずウィンドウ一覧を取得して表示
+                          _showAppWindowsSheet(app.name, screenSize, screenInfo, isBrowser, isTerminal);
+                        }
                       },
                     );
                   },
@@ -1543,7 +1552,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         builder: (context, scrollController) => Consumer(
           builder: (context, ref, _) {
             final state = ref.watch(webSocketProvider);
-            final l10n = ref.watch(l10nProvider);
             return Container(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -1555,7 +1563,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          l10n.windowsOf(appName),
+                          '$appName のウィンドウ',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 18,
@@ -1574,17 +1582,17 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    l10n.selectWindow,
-                    style: const TextStyle(color: Colors.white54, fontSize: 12),
+                    'ウィンドウを選択してください',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
                   ),
                   const SizedBox(height: 16),
                   if (state.appWindows.isEmpty)
-                    Center(
+                    const Center(
                       child: Padding(
-                        padding: const EdgeInsets.all(32),
+                        padding: EdgeInsets.all(32),
                         child: Text(
-                          l10n.fetchingWindows,
-                          style: const TextStyle(color: Colors.white54),
+                          'ウィンドウを取得中...',
+                          style: TextStyle(color: Colors.white54),
                         ),
                       ),
                     )
@@ -1610,15 +1618,15 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                               ),
                             ),
                             title: Text(
-                              window.title.isEmpty ? l10n.noTitle : window.title,
+                              window.title.isEmpty ? '(タイトルなし)' : window.title,
                               style: const TextStyle(color: Colors.white),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
                             subtitle: window.isMinimized
-                                ? Text(
-                                    l10n.minimized,
-                                    style: const TextStyle(color: Colors.orange, fontSize: 11),
+                                ? const Text(
+                                    '最小化中',
+                                    style: TextStyle(color: Colors.orange, fontSize: 11),
                                   )
                                 : null,
                             trailing: const Icon(
@@ -1654,15 +1662,140 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     );
   }
 
+  // Messagesアプリのチャット一覧を表示
+  void _showMessagesChatsSheet(Size screenSize, ScreenInfo? screenInfo) {
+    // チャット一覧を取得
+    ref.read(webSocketProvider.notifier).getMessagesChats();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF16213e),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.2,
+        maxChildSize: 0.8,
+        expand: false,
+        builder: (context, scrollController) => Consumer(
+          builder: (context, ref, _) {
+            final state = ref.watch(webSocketProvider);
+            return Container(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.message, color: Colors.green),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'メッセージ',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.refresh, color: Colors.white54),
+                        onPressed: () {
+                          ref.read(webSocketProvider.notifier).getMessagesChats();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'チャットを選択してください',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                  const SizedBox(height: 16),
+                  if (state.messagesChats.isEmpty)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Text(
+                          'チャットを取得中...',
+                          style: TextStyle(color: Colors.white54),
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: ListView.builder(
+                        controller: scrollController,
+                        itemCount: state.messagesChats.length,
+                        itemBuilder: (context, index) {
+                          final chat = state.messagesChats[index];
+                          final isIMessage = chat.service.toLowerCase().contains('imessage');
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: isIMessage
+                                  ? Colors.blue.withOpacity(0.3)
+                                  : Colors.green.withOpacity(0.3),
+                              radius: 20,
+                              child: Icon(
+                                isIMessage ? Icons.apple : Icons.sms,
+                                color: isIMessage ? Colors.blue : Colors.green,
+                                size: 20,
+                              ),
+                            ),
+                            title: Text(
+                              chat.name.isEmpty ? '(名前なし)' : chat.name,
+                              style: const TextStyle(color: Colors.white),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              isIMessage ? 'iMessage' : 'SMS',
+                              style: TextStyle(
+                                color: isIMessage ? Colors.blue.shade300 : Colors.green.shade300,
+                                fontSize: 11,
+                              ),
+                            ),
+                            trailing: const Icon(
+                              Icons.arrow_forward_ios,
+                              color: Colors.white38,
+                              size: 16,
+                            ),
+                            onTap: () {
+                              Navigator.pop(context);
+                              // チャットを開いてフォーカス
+                              ref.read(webSocketProvider.notifier).openMessagesChat(chat.id);
+                              // アプリにズーム
+                              Future.delayed(const Duration(milliseconds: 500), () {
+                                _zoomToApp('Messages', screenSize, screenInfo);
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   // アプリにズーム（ウィンドウ情報を取得してからズーム）
   void _zoomToApp(String appName, Size screenSize, ScreenInfo? screenInfo) async {
+    print('[ZoomToApp] Starting zoom for: $appName');
     // アプリをフォーカスしてウィンドウ情報を取得
     ref.read(webSocketProvider.notifier).focusAndGetWindow(appName);
 
-    // ウィンドウ情報が届くのを待つ（最大2秒、100ms間隔でチェック）
+    // ウィンドウ情報が届くのを待つ（最大3秒、150ms間隔でチェック）
     for (var i = 0; i < 20; i++) {
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 150));
       final state = ref.read(webSocketProvider);
+      print('[ZoomToApp] Checking windowInfo (attempt $i): ${state.windowInfo}');
       if (state.windowInfo != null) {
         print('[ZoomToApp] WindowInfo received: ${state.windowInfo!.x}, ${state.windowInfo!.y}, ${state.windowInfo!.width}x${state.windowInfo!.height}');
         _zoomToWindow(state.windowInfo!, screenSize, screenInfo);
@@ -1670,6 +1803,16 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       }
     }
     print('[ZoomToApp] WindowInfo not received within timeout');
+    // タイムアウト時はエラーメッセージを表示
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$appName のウィンドウを取得できませんでした'),
+          backgroundColor: Colors.red.shade700,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   void _showBrowserTabsSheet(String appName) {
@@ -1689,7 +1832,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         builder: (context, scrollController) => Consumer(
           builder: (context, ref, _) {
             final state = ref.watch(webSocketProvider);
-            final l10n = ref.watch(l10nProvider);
             return Container(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -1700,7 +1842,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       const Icon(Icons.tab, color: Colors.white),
                       const SizedBox(width: 8),
                       Text(
-                        l10n.tabsOf(appName),
+                        '$appName のタブ',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 18,
@@ -1718,12 +1860,12 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   ),
                   const SizedBox(height: 16),
                   if (state.browserTabs.isEmpty)
-                    Center(
+                    const Center(
                       child: Padding(
-                        padding: const EdgeInsets.all(32),
+                        padding: EdgeInsets.all(32),
                         child: Text(
-                          l10n.fetchingTabs,
-                          style: const TextStyle(color: Colors.white54),
+                          'タブを取得中...',
+                          style: TextStyle(color: Colors.white54),
                         ),
                       ),
                     )
@@ -1792,7 +1934,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         builder: (context, scrollController) => Consumer(
           builder: (context, ref, _) {
             final state = ref.watch(webSocketProvider);
-            final l10n = ref.watch(l10nProvider);
             return Container(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -1803,7 +1944,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       const Icon(Icons.terminal, color: Colors.white),
                       const SizedBox(width: 8),
                       Text(
-                        l10n.tabsOf(appName),
+                        '$appName のタブ',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 18,
@@ -1821,12 +1962,12 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   ),
                   const SizedBox(height: 16),
                   if (state.terminalTabs.isEmpty)
-                    Center(
+                    const Center(
                       child: Padding(
-                        padding: const EdgeInsets.all(32),
+                        padding: EdgeInsets.all(32),
                         child: Text(
-                          l10n.fetchingTabs,
-                          style: const TextStyle(color: Colors.white54),
+                          'タブを取得中...',
+                          style: TextStyle(color: Colors.white54),
                         ),
                       ),
                     )
@@ -1871,9 +2012,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                                       color: Colors.orange.withOpacity(0.3),
                                       borderRadius: BorderRadius.circular(4),
                                     ),
-                                    child: Text(
-                                      l10n.busy,
-                                      style: const TextStyle(color: Colors.orange, fontSize: 10),
+                                    child: const Text(
+                                      '実行中',
+                                      style: TextStyle(color: Colors.orange, fontSize: 10),
                                     ),
                                   ),
                                 ],
@@ -1902,24 +2043,23 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
   void _showSpotlightDialog() {
     final controller = TextEditingController();
-    final l10n = ref.read(l10nProvider);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
-        title: Text(l10n.spotlightSearch, style: const TextStyle(color: Colors.white)),
+        title: const Text('Spotlight検索', style: TextStyle(color: Colors.white)),
         content: TextField(
           controller: controller,
           autofocus: true,
           style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: l10n.searchHint,
-            hintStyle: const TextStyle(color: Colors.white38),
-            prefixIcon: const Icon(Icons.search, color: Colors.white54),
-            enabledBorder: const OutlineInputBorder(
+          decoration: const InputDecoration(
+            hintText: 'アプリ名やファイル名...',
+            hintStyle: TextStyle(color: Colors.white38),
+            prefixIcon: Icon(Icons.search, color: Colors.white54),
+            enabledBorder: OutlineInputBorder(
               borderSide: BorderSide(color: Colors.white24),
             ),
-            focusedBorder: const OutlineInputBorder(
+            focusedBorder: OutlineInputBorder(
               borderSide: BorderSide(color: Color(0xFFe94560)),
             ),
           ),
@@ -1933,7 +2073,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
+            child: const Text('キャンセル', style: TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
             onPressed: () {
@@ -1945,7 +2085,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFe94560),
             ),
-            child: Text(l10n.search),
+            child: const Text('検索'),
           ),
         ],
       ),
@@ -2270,31 +2410,30 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _showQuitAppDialog(String appName) {
-    final l10n = ref.read(l10nProvider);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
-        title: Text(l10n.quitApp, style: const TextStyle(color: Colors.white)),
+        title: const Text('アプリを終了', style: TextStyle(color: Colors.white)),
         content: Text(
-          l10n.quitAppConfirm(appName),
+          '$appName を終了しますか？',
           style: const TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
+            child: const Text('キャンセル', style: TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
             onPressed: () {
               ref.read(webSocketProvider.notifier).quitApp(appName);
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(l10n.appQuit(appName))),
+                SnackBar(content: Text('$appName を終了しました')),
               );
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: Text(l10n.quit),
+            child: const Text('終了'),
           ),
         ],
       ),

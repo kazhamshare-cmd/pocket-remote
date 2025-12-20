@@ -27,6 +27,9 @@ uuid = { version = "1", features = ["v4"] }
 local-ip-address = "0.6"
 parking_lot = "0.12"
 
+# 並列処理
+rayon = "1.10"
+
 # WebRTC画面共有
 webrtc = "0.11"
 scrap = "0.5"

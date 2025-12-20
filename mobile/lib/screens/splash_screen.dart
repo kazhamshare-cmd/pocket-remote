@@ -13,10 +13,12 @@ class _SplashScreenState extends State<SplashScreen>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _fadeAnimation;
+  bool _completed = false;
 
   @override
   void initState() {
     super.initState();
+    print('[SplashScreen] initState called');
     _controller = AnimationController(
       duration: const Duration(milliseconds: 1500),
       vsync: this,
@@ -29,20 +31,26 @@ class _SplashScreenState extends State<SplashScreen>
     _controller.forward();
 
     Future.delayed(const Duration(milliseconds: 2500), () {
-      widget.onComplete();
+      print('[SplashScreen] Timer completed, calling onComplete');
+      if (!_completed && mounted) {
+        _completed = true;
+        widget.onComplete();
+      }
     });
   }
 
   @override
   void dispose() {
+    print('[SplashScreen] dispose called');
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    print('[SplashScreen] build called');
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: const Color(0xFF1a1a2e),
       body: Center(
         child: FadeTransition(
           opacity: _fadeAnimation,

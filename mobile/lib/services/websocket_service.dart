@@ -170,6 +170,27 @@ class MousePosition {
   }
 }
 
+// Messagesアプリのチャット情報
+class MessagesChat {
+  final String id;
+  final String name;
+  final String service;
+
+  MessagesChat({
+    required this.id,
+    required this.name,
+    required this.service,
+  });
+
+  factory MessagesChat.fromJson(Map<String, dynamic> json) {
+    return MessagesChat(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      service: json['service'] as String,
+    );
+  }
+}
+
 class WebSocketState {
   final WsConnectionState connectionState;
   final List<Command> commands;
@@ -190,6 +211,7 @@ class WebSocketState {
   final bool isWebRTCActive; // WebRTCモードがアクティブか
   final String? webrtcConnectionState; // WebRTC接続状態
   final List<WindowListItem> appWindows; // アプリのウィンドウ一覧
+  final List<MessagesChat> messagesChats; // Messagesチャット一覧
 
   WebSocketState({
     this.connectionState = WsConnectionState.disconnected,
@@ -211,6 +233,7 @@ class WebSocketState {
     this.isWebRTCActive = false,
     this.webrtcConnectionState,
     this.appWindows = const [],
+    this.messagesChats = const [],
   });
 
   WebSocketState copyWith({
@@ -234,6 +257,7 @@ class WebSocketState {
     bool? isWebRTCActive,
     String? webrtcConnectionState,
     List<WindowListItem>? appWindows,
+    List<MessagesChat>? messagesChats,
   }) {
     return WebSocketState(
       connectionState: connectionState ?? this.connectionState,
@@ -255,6 +279,7 @@ class WebSocketState {
       isWebRTCActive: isWebRTCActive ?? this.isWebRTCActive,
       webrtcConnectionState: webrtcConnectionState ?? this.webrtcConnectionState,
       appWindows: appWindows ?? this.appWindows,
+      messagesChats: messagesChats ?? this.messagesChats,
     );
   }
 }
@@ -347,7 +372,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
     // フレーム受信コールバック
     _webrtcService!.onFrame = (frame) {
-      print('[WebRTC] Updating state with frame: ${frame.length} bytes, first bytes: ${frame.take(10).toList()}');
+      // ログは多すぎるので無効化
       state = state.copyWith(currentFrame: frame);
     };
 
@@ -429,6 +454,25 @@ class WebSocketService extends StateNotifier<WebSocketState> {
       'action': 'mouse_scroll',
       'delta_x': deltaX,
       'delta_y': deltaY,
+    });
+  }
+
+  /// ビューポート情報を送信（スクロール対応）
+  /// qualityMode: "low"（スクロール中）, "high"（停止時）
+  void sendViewport({
+    required int viewportX,
+    required int viewportY,
+    required int viewportWidth,
+    required int viewportHeight,
+    required String qualityMode,
+  }) {
+    _send({
+      'type': 'set_viewport',
+      'viewport_x': viewportX,
+      'viewport_y': viewportY,
+      'viewport_width': viewportWidth,
+      'viewport_height': viewportHeight,
+      'quality_mode': qualityMode,
     });
   }
 
@@ -560,6 +604,19 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     });
   }
 
+  // Messagesアプリのチャット一覧を取得
+  void getMessagesChats() {
+    _send({'type': 'get_messages_chats'});
+  }
+
+  // Messagesチャットを開く
+  void openMessagesChat(String chatId) {
+    _send({
+      'type': 'open_messages_chat',
+      'chat_id': chatId,
+    });
+  }
+
   // アプリを終了する
   void quitApp(String appName) {
     _send({
@@ -597,6 +654,15 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     _send({'type': 'maximize_window'});
   }
 
+  // ウィンドウを指定サイズにリサイズ
+  void resizeWindow(int width, int height) {
+    _send({
+      'type': 'resize_window',
+      'width': width,
+      'height': height,
+    });
+  }
+
   // キャプチャ領域を設定（高解像度フォーカス）
   void setCaptureRegion(int x, int y, int width, int height) {
     _send({
@@ -611,6 +677,18 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   // キャプチャ領域をリセット（全画面に戻す）
   void resetCaptureRegion() {
     _send({'type': 'reset_capture_region'});
+  }
+
+  // スクロール（縦横スクロール）
+  // direction: "up", "down", "left", "right"
+  // amount: スクロール量（デフォルト100）
+  void scroll(String direction, {int amount = 100}) {
+    print('[WebSocket] Sending scroll: $direction, amount: $amount');
+    _send({
+      'type': 'scroll',
+      'direction': direction,
+      'amount': amount,
+    });
   }
 
   void _send(Map<String, dynamic> data) {
@@ -716,6 +794,14 @@ class WebSocketService extends StateNotifier<WebSocketState> {
               .map((w) => WindowListItem.fromJson(w as Map<String, dynamic>))
               .toList();
           state = state.copyWith(appWindows: windows);
+          break;
+
+        case 'messages_chats':
+          final chatsJson = data['chats'] as List<dynamic>;
+          final chats = chatsJson
+              .map((c) => MessagesChat.fromJson(c as Map<String, dynamic>))
+              .toList();
+          state = state.copyWith(messagesChats: chats);
           break;
 
         case 'window_info':

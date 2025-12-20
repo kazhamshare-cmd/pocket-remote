@@ -62,6 +62,23 @@ impl InputController {
         let _ = self.tx.send(event);
     }
 
+    /// スクロール処理
+    /// direction: "up", "down", "left", "right"
+    /// amount: スクロール量（ピクセル単位、正の値）
+    pub fn scroll(&self, direction: &str, amount: i32) {
+        let (delta_x, delta_y) = match direction {
+            "up" => (0, amount),      // 上にスクロール（コンテンツは下に移動）
+            "down" => (0, -amount),   // 下にスクロール（コンテンツは上に移動）
+            "left" => (amount, 0),    // 左にスクロール
+            "right" => (-amount, 0),  // 右にスクロール
+            _ => {
+                eprintln!("Unknown scroll direction: {}", direction);
+                return;
+            }
+        };
+        self.send_event(InputEvent::MouseScroll { delta_x, delta_y });
+    }
+
     fn handle_event_inner(enigo: &mut Enigo, event: InputEvent) -> Result<(), String> {
         match event {
             InputEvent::MouseMove { x, y } => {
@@ -179,17 +196,67 @@ impl InputController {
                 }
             }
             InputEvent::MouseScroll { delta_x, delta_y } => {
+                println!("[InputController] MouseScroll: delta_x={}, delta_y={}", delta_x, delta_y);
                 if delta_y != 0 {
-                    enigo.scroll(delta_y, enigo::Axis::Vertical)
+                    // スクロール量を調整（より高感度に）
+                    // 小さな値でも最低1行はスクロールするように
+                    let scroll_amount = if delta_y.abs() < 3 {
+                        delta_y.signum() // 最低1行
+                    } else {
+                        delta_y / 3  // 3で割る（より高感度）
+                    };
+                    println!("[InputController] Scrolling vertical: {} lines", scroll_amount);
+                    enigo.scroll(scroll_amount, enigo::Axis::Vertical)
                         .map_err(|e| e.to_string())?;
                 }
                 if delta_x != 0 {
-                    enigo.scroll(delta_x, enigo::Axis::Horizontal)
+                    let scroll_amount = if delta_x.abs() < 3 {
+                        delta_x.signum()
+                    } else {
+                        delta_x / 3
+                    };
+                    println!("[InputController] Scrolling horizontal: {} lines", scroll_amount);
+                    enigo.scroll(scroll_amount, enigo::Axis::Horizontal)
                         .map_err(|e| e.to_string())?;
                 }
             }
             InputEvent::KeyPress { key } => {
-                if let Some(k) = Self::parse_key(&key) {
+                // モディファイア+キーの組み合わせをサポート（例: "shift+tab", "cmd+a"）
+                let parts: Vec<&str> = key.split('+').collect();
+                if parts.len() == 2 {
+                    // モディファイア+キーの組み合わせ
+                    let modifier = parts[0].to_lowercase();
+                    let main_key = parts[1];
+
+                    let modifier_key = match modifier.as_str() {
+                        "shift" => Some(Key::Shift),
+                        "ctrl" | "control" => Some(Key::Control),
+                        "alt" | "option" => Some(Key::Alt),
+                        "cmd" | "command" | "meta" => Some(Key::Meta),
+                        _ => None,
+                    };
+
+                    if let (Some(mod_key), Some(k)) = (modifier_key, Self::parse_key(main_key)) {
+                        enigo.key(mod_key, enigo::Direction::Press)
+                            .map_err(|e| e.to_string())?;
+                        enigo.key(k, enigo::Direction::Click)
+                            .map_err(|e| e.to_string())?;
+                        enigo.key(mod_key, enigo::Direction::Release)
+                            .map_err(|e| e.to_string())?;
+                    } else if let Some(mod_key) = modifier_key {
+                        // main_keyが単一文字の場合
+                        if main_key.len() == 1 {
+                            let c = main_key.chars().next().unwrap();
+                            enigo.key(mod_key, enigo::Direction::Press)
+                                .map_err(|e| e.to_string())?;
+                            enigo.key(Key::Unicode(c), enigo::Direction::Click)
+                                .map_err(|e| e.to_string())?;
+                            enigo.key(mod_key, enigo::Direction::Release)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                } else if let Some(k) = Self::parse_key(&key) {
+                    // 単一キー
                     enigo.key(k, enigo::Direction::Click)
                         .map_err(|e| e.to_string())?;
                 }

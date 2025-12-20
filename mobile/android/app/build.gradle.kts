@@ -17,7 +17,7 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace = "com.remotetouch.app"
     compileSdk = 36
-    ndkVersion = "27.0.12077973"  // NDK r27 for 16KB page size support
+    ndkVersion = "28.2.13676358"  // NDK r28 for full 16KB page size support
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -45,6 +45,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false  // Required for 16KB page size support
+            // Exclude 32-bit ABIs for 16KB page size requirement
+            excludes += listOf("lib/armeabi-v7a/**", "lib/x86/**")
         }
     }
 

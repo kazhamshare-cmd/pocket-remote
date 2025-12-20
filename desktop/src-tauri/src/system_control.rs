@@ -57,12 +57,34 @@ pub struct WindowListItem {
     pub is_minimized: bool,
 }
 
+/// Messagesアプリのチャット情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagesChat {
+    pub id: String,
+    pub name: String,
+    pub service: String,  // SMS, iMessage等
+}
+
 pub struct SystemController;
 
 impl SystemController {
     /// 起動中のアプリケーション一覧を取得（高速版）
     #[cfg(target_os = "macos")]
     pub fn get_running_apps() -> Vec<RunningApp> {
+        // ウィンドウ操作がうまくいかないアプリのブロックリスト
+        // ※最小限のシステムUIコンポーネントのみ
+        let blocklist = [
+            "Control Center",
+            "SystemUIServer",
+            "NotificationCenter",
+            "AirPlayUIAgent",
+            "TextInputMenuAgent",
+            "TextInputSwitcher",
+            "universalAccessAuthWarn",
+            "CoreServicesUIAgent",
+            "UserNotificationCenter",
+        ];
+
         // 高速化: 一括取得でループを避ける、明示的なデリミタを使用
         let script = r#"
             tell application "System Events"
@@ -94,6 +116,7 @@ impl SystemController {
                     return app_names
                         .into_iter()
                         .filter(|name| !name.is_empty())
+                        .filter(|name| !blocklist.iter().any(|blocked| name == blocked))
                         .map(|name| RunningApp {
                             name: name.to_string(),
                             bundle_id: None,
@@ -155,8 +178,14 @@ impl SystemController {
     /// アプリをフォーカス（アクティブに）- macOS版
     #[cfg(target_os = "macos")]
     pub fn focus_app(app_name: &str) -> bool {
+        // タイムアウト付きでアプリをアクティブ化
+        // 一部のアプリ（Messages等）はactivateがハングすることがある
         let script = format!(
-            r#"tell application "{}" to activate"#,
+            r#"
+            with timeout of 2 seconds
+                tell application "{}" to activate
+            end timeout
+            "#,
             app_name.replace("\"", "\\\"")
         );
 
@@ -324,23 +353,24 @@ impl SystemController {
     pub fn focus_app_window(app_name: &str, window_index: usize) -> bool {
         let escaped_name = app_name.replace("\"", "\\\"");
 
-        // アプリをアクティブにして、指定ウィンドウを最前面に
+        // 特定のウィンドウだけを最前面に（他のウィンドウは移動しない）
+        // System Eventsを使って直接ウィンドウを操作
         let script = format!(
             r#"
-            tell application "{}"
-                activate
-            end tell
             tell application "System Events"
                 tell process "{}"
                     try
+                        -- 指定ウィンドウを取得
                         set targetWindow to window {}
+                        -- ウィンドウを最前面に上げる
                         perform action "AXRaise" of targetWindow
+                        -- プロセスを最前面に
                         set frontmost to true
                     end try
                 end tell
             end tell
             "#,
-            escaped_name, escaped_name, window_index
+            escaped_name, window_index
         );
 
         Command::new("osascript")
@@ -650,6 +680,7 @@ impl SystemController {
             return Vec::new();
         };
 
+        println!("[get_browser_tabs] Running AppleScript for {}", app_name);
         let output = Command::new("osascript")
             .arg("-e")
             .arg(&script)
@@ -658,10 +689,15 @@ impl SystemController {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                println!("[get_browser_tabs] stdout: {}", stdout);
+                if !stderr.is_empty() {
+                    println!("[get_browser_tabs] stderr: {}", stderr);
+                }
                 parse_browser_tabs(&stdout)
             }
             Err(e) => {
-                eprintln!("Failed to get browser tabs: {}", e);
+                eprintln!("[get_browser_tabs] Failed: {}", e);
                 Vec::new()
             }
         }
@@ -671,6 +707,132 @@ impl SystemController {
     #[cfg(target_os = "windows")]
     pub fn get_browser_tabs(_app_name: &str) -> Vec<BrowserTab> {
         Vec::new()
+    }
+
+    /// Messagesアプリのチャット一覧を取得 - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_messages_chats() -> Vec<MessagesChat> {
+        let script = r#"
+            tell application "Messages"
+                set chatList to {}
+                set chatCount to count of chats
+                if chatCount > 50 then set chatCount to 50
+                repeat with i from 1 to chatCount
+                    set c to chat i
+                    try
+                        set chatId to id of c
+                        set chatService to service type of c as text
+                        -- 参加者名を取得
+                        set participantNames to ""
+                        try
+                            set participantList to participants of c
+                            if (count of participantList) > 0 then
+                                repeat with p in participantList
+                                    if participantNames is not "" then
+                                        set participantNames to participantNames & ", "
+                                    end if
+                                    try
+                                        set participantNames to participantNames & (name of p)
+                                    on error
+                                        set participantNames to participantNames & (handle of p)
+                                    end try
+                                end repeat
+                            end if
+                        end try
+                        if participantNames is "" then
+                            -- IDから名前部分を抽出
+                            set AppleScript's text item delimiters to ";"
+                            set idParts to text items of chatId
+                            if (count of idParts) >= 3 then
+                                set participantNames to item 3 of idParts
+                            else
+                                set participantNames to chatId
+                            end if
+                            set AppleScript's text item delimiters to ""
+                        end if
+                        set end of chatList to chatId & ":::" & participantNames & ":::" & chatService
+                    end try
+                end repeat
+                set AppleScript's text item delimiters to "|||"
+                set chatListText to chatList as text
+                set AppleScript's text item delimiters to ""
+                return chatListText
+            end tell
+        "#;
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if stdout.is_empty() {
+                    return Vec::new();
+                }
+
+                stdout
+                    .split("|||")
+                    .filter_map(|entry| {
+                        let parts: Vec<&str> = entry.splitn(3, ":::").collect();
+                        if parts.len() >= 3 {
+                            Some(MessagesChat {
+                                id: parts[0].to_string(),
+                                name: parts[1].to_string(),
+                                service: parts[2].to_string(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                eprintln!("Failed to get Messages chats: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Messagesアプリのチャット一覧 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_messages_chats() -> Vec<MessagesChat> {
+        Vec::new()
+    }
+
+    /// Messagesチャットを開く - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn open_messages_chat(chat_id: &str) -> bool {
+        let escaped_id = chat_id.replace("\"", "\\\"");
+        let script = format!(
+            r#"
+            tell application "Messages"
+                activate
+                try
+                    set targetChat to chat id "{}"
+                    -- チャットウィンドウを開く（直接的な方法がないのでURLスキームを使用）
+                end try
+            end tell
+            "#,
+            escaped_id
+        );
+
+        // Messagesをアクティベートしてからチャットを開く
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+
+        // Messagesアプリをフォーカス
+        Self::focus_app("Messages");
+        true
+    }
+
+    /// Messagesチャットを開く - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn open_messages_chat(_chat_id: &str) -> bool {
+        false
     }
 
     /// Safariのタブをアクティブにする - macOS版
@@ -1133,22 +1295,25 @@ impl SystemController {
     /// 最前面のウィンドウ情報を取得 - macOS版
     #[cfg(target_os = "macos")]
     pub fn get_frontmost_window() -> Option<AppWindowInfo> {
+        // タイムアウト付きでウィンドウ情報を取得
         let script = r#"
-            tell application "System Events"
-                set frontApp to first application process whose frontmost is true
-                set appName to name of frontApp
+            with timeout of 3 seconds
+                tell application "System Events"
+                    set frontApp to first application process whose frontmost is true
+                    set appName to name of frontApp
 
-                try
-                    set frontWindow to first window of frontApp
-                    set winName to name of frontWindow
-                    set winPos to position of frontWindow
-                    set winSize to size of frontWindow
+                    try
+                        set frontWindow to first window of frontApp
+                        set winName to name of frontWindow
+                        set winPos to position of frontWindow
+                        set winSize to size of frontWindow
 
-                    return appName & "|" & winName & "|" & (item 1 of winPos) & "|" & (item 2 of winPos) & "|" & (item 1 of winSize) & "|" & (item 2 of winSize)
-                on error
-                    return appName & "|" & "No Window" & "|0|0|0|0"
-                end try
-            end tell
+                        return appName & "|" & winName & "|" & (item 1 of winPos) & "|" & (item 2 of winPos) & "|" & (item 1 of winSize) & "|" & (item 2 of winSize)
+                    on error
+                        return appName & "|" & "No Window" & "|0|0|0|0"
+                    end try
+                end tell
+            end timeout
         "#;
 
         let output = Command::new("osascript")
@@ -1252,11 +1417,12 @@ impl SystemController {
 
     /// 指定アプリのウィンドウを最前面に持ってきてサイズを取得（最大化しない）
     pub fn focus_and_get_window(app_name: &str) -> Option<AppWindowInfo> {
-        // まずアプリをフォーカス
+        // まずアプリをフォーカス（アクティブ化）
+        println!("[SystemControl] focus_and_get_window: Focusing app '{}'", app_name);
         Self::focus_app(app_name);
 
-        // 少し待機
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // アプリがアクティブになるのを待つ
+        std::thread::sleep(std::time::Duration::from_millis(300));
 
         // ウィンドウを左上に移動（座標計算を簡単にするため）
         Self::move_window_to_top_left(None, None);
@@ -1423,6 +1589,34 @@ impl SystemController {
             .unwrap_or(false)
     }
 
+    /// ウィンドウを指定サイズにリサイズ - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn resize_window(width: i32, height: i32) -> bool {
+        let script = format!(r#"
+            tell application "System Events"
+                set frontApp to first application process whose frontmost is true
+                try
+                    set frontWindow to first window of frontApp
+                    tell frontWindow
+                        -- 左上に配置してリサイズ
+                        set position to {{0, 25}}
+                        set size to {{{}, {}}}
+                    end tell
+                    return true
+                on error errMsg
+                    return false
+                end try
+            end tell
+        "#, width, height);
+
+        Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     /// ウィンドウを最大化 - Windows版
     #[cfg(target_os = "windows")]
     pub fn maximize_window() -> bool {
@@ -1446,15 +1640,41 @@ impl SystemController {
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.status().map(|s| s.success()).unwrap_or(false)
     }
+
+    /// ウィンドウを指定サイズにリサイズ - Windows版
+    #[cfg(target_os = "windows")]
+    pub fn resize_window(width: i32, height: i32) -> bool {
+        let script = format!(r#"
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public class Win32 {{
+                [DllImport("user32.dll")]
+                public static extern IntPtr GetForegroundWindow();
+                [DllImport("user32.dll")]
+                public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+            }}
+'@
+            $hwnd = [Win32]::GetForegroundWindow()
+            [Win32]::MoveWindow($hwnd, 0, 0, {}, {}, $true)
+        "#, width, height);
+
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
 }
 
 /// AppleScriptの出力をパースしてBrowserTabのリストに変換
 fn parse_browser_tabs(output: &str) -> Vec<BrowserTab> {
     let mut tabs = Vec::new();
     let trimmed = output.trim();
+    println!("[parse_browser_tabs] Input: {:?}", trimmed);
 
     // 簡易パース: index, title, url の組み合わせを探す
     let parts: Vec<&str> = trimmed.split(", ").collect();
+    println!("[parse_browser_tabs] Parts count: {}", parts.len());
 
     let mut i = 0;
     while i + 2 < parts.len() {
@@ -1472,6 +1692,7 @@ fn parse_browser_tabs(output: &str) -> Vec<BrowserTab> {
         i += 3;
     }
 
+    println!("[parse_browser_tabs] Parsed {} tabs", tabs.len());
     tabs
 }
 

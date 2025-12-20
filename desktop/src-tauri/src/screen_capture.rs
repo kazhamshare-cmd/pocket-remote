@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use parking_lot::RwLock;
 use std::sync::Arc;
+use rayon::prelude::*;
 use crate::CaptureRegion;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,23 +99,28 @@ impl ScreenCapturer {
                             logged_info = true;
                         }
 
-                        // RGBA画像データを作成
+                        // RGBA画像データを作成（rayon並列化版）
                         // macOS scrapはBGRA形式: B=frame[i], G=frame[i+1], R=frame[i+2], A=frame[i+3]
-                        let mut rgba_data = Vec::with_capacity(width * height * 4);
+                        // scrap::FrameはSync未実装のため、まずコピー
+                        let frame_data: Vec<u8> = frame.to_vec();
+                        let mut rgba_data = vec![0u8; width * height * 4];
+                        let row_width = width * 4;
 
-                        for y in 0..height {
-                            let row_start = y * actual_stride;
-                            for x in 0..width {
-                                let i = row_start + x * bytes_per_pixel;
-                                if i + 3 < frame.len() {
-                                    // BGRA → RGBA 変換
-                                    rgba_data.push(frame[i + 2]); // R
-                                    rgba_data.push(frame[i + 1]); // G
-                                    rgba_data.push(frame[i]);     // B
-                                    rgba_data.push(frame[i + 3]); // A
+                        rgba_data
+                            .par_chunks_mut(row_width)
+                            .enumerate()
+                            .for_each(|(y, dst_row)| {
+                                let row_start = y * actual_stride;
+                                for (x, dst_chunk) in dst_row.chunks_exact_mut(4).enumerate() {
+                                    let i = row_start + x * bytes_per_pixel;
+                                    if i + 3 < frame_data.len() {
+                                        dst_chunk[0] = frame_data[i + 2]; // R
+                                        dst_chunk[1] = frame_data[i + 1]; // G
+                                        dst_chunk[2] = frame_data[i];     // B
+                                        dst_chunk[3] = frame_data[i + 3]; // A
+                                    }
                                 }
-                            }
-                        }
+                            });
 
                         if rgba_data.len() == width * height * 4 {
                             if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(

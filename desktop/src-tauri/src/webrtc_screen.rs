@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use parking_lot::RwLock as ParkingRwLock;
+use rayon::prelude::*;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -193,6 +194,12 @@ async fn capture_loop(
     capture_running: Arc<RwLock<bool>>,
     capture_region: Arc<ParkingRwLock<Option<CaptureRegion>>>,
 ) {
+    // Data Channelの参照を事前に取得（キャッシュ）
+    let cached_dc = {
+        let dc_guard = data_channel.read().await;
+        dc_guard.clone()
+    };
+
     // キャプチャスレッドで実行
     let result = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
@@ -249,26 +256,27 @@ async fn capture_loop(
         let mut frame_count: u64 = 0;
         let mut last_send_time = Instant::now();
         let mut would_block_count: u32 = 0;
-        let mut loop_count: u64 = 0;
+
+        // Data Channelをローカル変数として保持
+        let dc = cached_dc;
 
         loop {
-            loop_count += 1;
-            // 最初の10ループと、その後は1000ループごとにログ
-            if loop_count <= 10 || loop_count % 1000 == 0 {
-                println!("[WebRTC] Capture loop iteration {}", loop_count);
-            }
-            // 実行フラグチェック
-            let running = rt.block_on(async {
-                *capture_running.read().await
-            });
-            if !running {
-                break;
+            // 実行フラグチェック（30フレームごと、または最初のフレーム）
+            if frame_count % 30 == 0 {
+                let running = rt.block_on(async {
+                    *capture_running.read().await
+                });
+                if !running {
+                    break;
+                }
             }
 
             let start = Instant::now();
 
             match capturer.frame() {
                 Ok(frame) => {
+                    let capture_time = start.elapsed();
+
                     // キャプチャ領域を取得
                     let region = capture_region.read().clone();
 
@@ -282,13 +290,10 @@ async fn capture_loop(
                     }
 
                     // フレームをエンコード
-                    if let Some(encoded) = encode_frame(&frame, width, height, region) {
-                        // Data Channelで送信
-                        let dc_opt = rt.block_on(async {
-                            data_channel.read().await.clone()
-                        });
-
-                        if let Some(dc) = dc_opt {
+                    let encode_start = Instant::now();
+                    if let Some(encoded) = encode_frame(&frame, width, height, region, frame_count) {
+                        let encode_time = encode_start.elapsed();
+                        if let Some(ref dc) = dc {
                             // Data Channelが開いているか確認
                             let dc_state = dc.ready_state();
                             if dc_state == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
@@ -309,7 +314,8 @@ async fn capture_loop(
                                 if frame_count <= 10 || frame_count % 100 == 0 {
                                     let elapsed = last_send_time.elapsed();
                                     let fps = if frame_count > 1 { (frame_count as f64) / elapsed.as_secs_f64() } else { 0.0 };
-                                    println!("[WebRTC] Frame {} sent ({} KB), {:.1} fps", frame_count, data_len / 1024, fps);
+                                    println!("[WebRTC] Frame {} sent ({} KB), {:.1} fps, capture={:?}, encode={:?}",
+                                        frame_count, data_len / 1024, fps, capture_time, encode_time);
                                     if frame_count == 100 {
                                         last_send_time = Instant::now();
                                     }
@@ -324,11 +330,14 @@ async fn capture_loop(
                     }
                 }
                 Err(ref e) if e.kind() == WouldBlock => {
-                    // フレーム準備中
+                    // フレーム準備中 - 短いスリープで待機
                     would_block_count += 1;
                     if would_block_count == 100 || would_block_count % 1000 == 0 {
                         println!("[WebRTC] WouldBlock count: {}", would_block_count);
                     }
+                    // WouldBlockの場合は短いスリープで次のフレームを待つ
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
                 }
                 Err(e) => {
                     eprintln!("[WebRTC] Capture error: {}", e);
@@ -351,8 +360,10 @@ async fn capture_loop(
     }
 }
 
-/// フレームエンコード（JPEG、低品質・高速）
-fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<CaptureRegion>) -> Option<Vec<u8>> {
+/// フレームエンコード（JPEG、ビューポート・画質モード対応）
+fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<CaptureRegion>, frame_count: u64) -> Option<Vec<u8>> {
+    let should_log = frame_count < 5;
+    let encode_start = std::time::Instant::now();
     let bytes_per_pixel = 4;
 
     // macOS IOSurfaceは128バイトアライメントを使用
@@ -366,18 +377,22 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
         return None;
     }
 
-    // 選択領域があれば切り抜き、なければ全画面
-    let (crop_x, crop_y, crop_w, crop_h, is_region) = match &region {
+    // ウィンドウ領域をそのままクロップ（シンプル化）
+    let (crop_x, crop_y, crop_w, crop_h) = match &region {
         Some(r) => {
-            // 領域が画面内に収まるようにクランプ
+            // ウィンドウ座標をクロップ
             let x = (r.x as usize).min(width.saturating_sub(1));
             let y = (r.y as usize).min(height.saturating_sub(1));
             let w = (r.width as usize).min(width.saturating_sub(x));
             let h = (r.height as usize).min(height.saturating_sub(y));
-            (x, y, w, h, true)
+
+            (x, y, w, h)
         }
-        None => (0, 0, width, height, false),
+        None => (0, 0, width, height),
     };
+
+    // 常に高画質モード（シンプル化）
+    let is_low_quality = false;
 
     // サイズが有効か確認
     if crop_w == 0 || crop_h == 0 {
@@ -385,24 +400,36 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
         return None;
     }
 
-    // BGRAからRGBAに変換（切り抜き領域のみ）
-    let mut rgba_data = Vec::with_capacity(crop_w * crop_h * 4);
-    for y in crop_y..(crop_y + crop_h) {
-        let row_start = y * actual_stride;
-        for x in crop_x..(crop_x + crop_w) {
-            let src = row_start + x * bytes_per_pixel;
-            if src + 3 < bgra.len() {
-                rgba_data.push(bgra[src + 2]);     // R
-                rgba_data.push(bgra[src + 1]);     // G
-                rgba_data.push(bgra[src]);         // B
-                rgba_data.push(255);               // A
+    // BGRAからRGBAに変換（切り抜き領域のみ、rayon並列化版）
+    let rgba_size = crop_w * crop_h * 4;
+    let mut rgba_data = vec![0u8; rgba_size];
+    let row_width = crop_w * 4;
+
+    // 行単位で並列処理
+    rgba_data
+        .par_chunks_mut(row_width)
+        .enumerate()
+        .for_each(|(row_idx, dst_row)| {
+            let y = crop_y + row_idx;
+            let row_start = y * actual_stride + crop_x * bytes_per_pixel;
+            let row_end = row_start + crop_w * bytes_per_pixel;
+
+            if row_end <= bgra.len() {
+                let src_row = &bgra[row_start..row_end];
+                for (dst_chunk, src_chunk) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+                    dst_chunk[0] = src_chunk[2]; // R (from B)
+                    dst_chunk[1] = src_chunk[1]; // G
+                    dst_chunk[2] = src_chunk[0]; // B (from R)
+                    dst_chunk[3] = 255;          // A
+                }
             }
-        }
-    }
+        });
 
     if rgba_data.len() != crop_w * crop_h * 4 {
         return None;
     }
+
+    let convert_time = encode_start.elapsed();
 
     let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
         crop_w as u32,
@@ -412,39 +439,52 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
 
     let dynamic_img = DynamicImage::ImageRgba8(img);
 
-    // ウィンドウサイズに応じてスケールを決定
-    // 63KB制限を確実に守るため、大きいウィンドウは1/2スケール
+    // ウィンドウサイズに応じてスケールを決定（64KB制限内で高速化）
     let pixel_count = crop_w * crop_h;
-    let (scale, start_quality) = if pixel_count <= 200000 {
-        // 500x400 = 200,000px以下 → フルサイズ、最高品質
-        println!("[WebRTC] XSmall window {}x{} ({}px) → full size, 92% quality", crop_w, crop_h, pixel_count);
-        (1, 92u8)
-    } else if pixel_count <= 400000 {
-        // 800x500 = 400,000px以下 → フルサイズ、高品質
-        println!("[WebRTC] Small window {}x{} ({}px) → full size, 85% quality", crop_w, crop_h, pixel_count);
-        (1, 85u8)
+    let (scale, start_quality) = if pixel_count <= 150000 {
+        // ~400x375以下 → フルサイズ、高品質
+        if should_log {
+            println!("[WebRTC] XSmall window {}x{} ({}px) → full size, 80% quality", crop_w, crop_h, pixel_count);
+        }
+        (1, 80u8)
+    } else if pixel_count <= 300000 {
+        // ~600x500以下 → フルサイズ、中品質
+        if should_log {
+            println!("[WebRTC] Small window {}x{} ({}px) → full size, 65% quality", crop_w, crop_h, pixel_count);
+        }
+        (1, 65u8)
     } else if pixel_count <= 600000 {
-        // 1000x600 = 600,000px以下 → フルサイズ、中品質
-        println!("[WebRTC] Medium window {}x{} ({}px) → full size, 70% quality", crop_w, crop_h, pixel_count);
-        (1, 70u8)
+        // ~800x750以下 → 1/2サイズ
+        if should_log {
+            println!("[WebRTC] Medium window {}x{} ({}px) → 1/2 size, 70% quality", crop_w, crop_h, pixel_count);
+        }
+        (2, 70u8)
     } else {
-        // 600,000px以上 → 1/2サイズで高品質
-        println!("[WebRTC] Large window {}x{} ({}px) → 1/2 size, 80% quality", crop_w, crop_h, pixel_count);
-        (2, 80u8)
+        // 600,000px以上 → 1/2サイズ
+        if should_log {
+            println!("[WebRTC] Large window {}x{} ({}px) → 1/2 size, 65% quality", crop_w, crop_h, pixel_count);
+        }
+        (2, 65u8)
     };
 
     let new_width = (crop_w / scale) as u32;
     let new_height = (crop_h / scale) as u32;
+    if should_log {
+        println!("[WebRTC] Sending frame: crop={}x{}, scale=1/{}, final={}x{}", crop_w, crop_h, scale, new_width, new_height);
+    }
+    let resize_start = std::time::Instant::now();
     let final_img = if scale == 1 {
         dynamic_img
     } else {
         dynamic_img.resize_exact(
             new_width.max(1),
             new_height.max(1),
-            image::imageops::FilterType::Triangle,
+            image::imageops::FilterType::Nearest,  // 高速リサイズ
         )
     };
+    let resize_time = resize_start.elapsed();
 
+    let jpeg_start = std::time::Instant::now();
     // 動的品質調整: 63KB以下になるまで品質を下げる（WebRTC上限64KB）
     let max_size = 63 * 1024;
     let mut quality = start_quality;
@@ -456,8 +496,13 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
 
         if final_img.write_with_encoder(encoder).is_ok() {
             if jpeg_data.len() <= max_size {
-                if quality < original_quality {
-                    println!("[WebRTC] Quality adjusted: {}% → {}%, size: {} KB", original_quality, quality, jpeg_data.len() / 1024);
+                let jpeg_time = jpeg_start.elapsed();
+                if should_log {
+                    println!("[WebRTC] Timing: convert={:?}, resize={:?}, jpeg={:?}, total={:?}",
+                        convert_time, resize_time, jpeg_time, encode_start.elapsed());
+                    if quality < original_quality {
+                        println!("[WebRTC] Quality adjusted: {}% → {}%, size: {} KB", original_quality, quality, jpeg_data.len() / 1024);
+                    }
                 }
                 return Some(jpeg_data);
             }

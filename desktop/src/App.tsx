@@ -431,10 +431,19 @@ function App() {
         </div>
       )}
 
-      <div className="commands-section">
-        <h2>Connection Info</h2>
-        <div className="command-list">
-          <p className="empty-message">Scan QR code with mobile app to connect</p>
+      {/* 接続中の端末 / Connected Devices */}
+      <div className="connected-devices-section">
+        <h2>Connected Devices</h2>
+        <div className="device-list">
+          {connected && connectedDevice ? (
+            <div className="device-item connected">
+              <span className="device-icon">📱</span>
+              <span className="device-name">{connectedDevice}</span>
+              <span className="device-status">● Connected</span>
+            </div>
+          ) : (
+            <p className="empty-message">No devices connected. Scan QR code with mobile app.</p>
+          )}
         </div>
       </div>
     </div>
