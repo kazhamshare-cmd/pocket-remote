@@ -27,14 +27,16 @@ class RunningApp {
   final String name;
   final String? bundleId;
   final bool isActive;
+  final bool isCli; // ターミナルで実行中のCLIツールかどうか
 
-  RunningApp({required this.name, this.bundleId, required this.isActive});
+  RunningApp({required this.name, this.bundleId, required this.isActive, this.isCli = false});
 
   factory RunningApp.fromJson(Map<String, dynamic> json) {
     return RunningApp(
       name: json['name'] as String,
       bundleId: json['bundle_id'] as String?,
       isActive: json['is_active'] as bool? ?? false,
+      isCli: json['is_cli'] as bool? ?? false,
     );
   }
 }
@@ -236,6 +238,9 @@ class WebSocketState {
     this.messagesChats = const [],
   });
 
+  // 接続中かどうか
+  bool get isConnected => connectionState == WsConnectionState.connected;
+
   WebSocketState copyWith({
     WsConnectionState? connectionState,
     List<Command>? commands,
@@ -290,11 +295,34 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   ConnectionInfo? _connectionInfo;
   WebRTCService? _webrtcService;
 
+  // シェルコマンド実行用のCompleter
+  Completer<String>? _shellCommandCompleter;
+
+  // PTY（永続ターミナル）セッション用
+  final _ptyOutputController = StreamController<String>.broadcast();
+  Stream<String> get ptyOutputStream => _ptyOutputController.stream;
+  bool _ptySessionActive = false;
+
+  // ターミナルコンテンツ取得用
+  final _terminalContentController = StreamController<String>.broadcast();
+  Stream<String> get terminalContentStream => _terminalContentController.stream;
+  Completer<String>? _terminalContentCompleter;
+
   WebSocketService() : super(WebSocketState());
+
+  // 安全にstateを更新（ウィジェット破棄後のエラーを防止）
+  void _safeSetState(WebSocketState Function(WebSocketState) updater) {
+    try {
+      state = updater(state);
+    } catch (e) {
+      // ウィジェット破棄後のエラーを無視
+      print('[WebSocket] State update ignored (widget disposed): $e');
+    }
+  }
 
   Future<void> connect(ConnectionInfo info) async {
     _connectionInfo = info;
-    state = state.copyWith(connectionState: WsConnectionState.connecting);
+    _safeSetState((s) => s.copyWith(connectionState: WsConnectionState.connecting));
     print('[WebSocket] Connecting to: ${info.wsUrl}');
     print('[WebSocket] Token: ${info.token}');
     print('[WebSocket] isExternal: ${info.isExternal}');
@@ -321,10 +349,10 @@ class WebSocketService extends StateNotifier<WebSocketState> {
       _send(authMsg);
     } catch (e) {
       print('[WebSocket] Connection error: $e');
-      state = state.copyWith(
+      _safeSetState((s) => s.copyWith(
         connectionState: WsConnectionState.error,
         errorMessage: e.toString(),
-      );
+      ));
     }
   }
 
@@ -334,7 +362,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
-    state = WebSocketState();
+    _safeSetState((_) => WebSocketState());
   }
 
   void executeCommand(String commandId) {
@@ -354,12 +382,12 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   void startScreenShare() {
     _send({'type': 'start_screen_share'});
-    state = state.copyWith(isScreenSharing: true);
+    _safeSetState((s) => s.copyWith(isScreenSharing: true));
   }
 
   void stopScreenShare() {
     _send({'type': 'stop_screen_share'});
-    state = state.copyWith(isScreenSharing: false, currentFrame: null);
+    _safeSetState((s) => s.copyWith(isScreenSharing: false, currentFrame: null));
   }
 
   // WebRTC画面共有開始
@@ -370,20 +398,23 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     _webrtcService = WebRTCService();
     await _webrtcService!.initialize();
 
-    // フレーム受信コールバック
+    // フレーム受信コールバック（接続中のみ更新）
     _webrtcService!.onFrame = (frame) {
-      // ログは多すぎるので無効化
-      state = state.copyWith(currentFrame: frame);
+      // 接続が切れている場合は無視（破棄後のstate更新エラー防止）
+      if (_channel == null) return;
+      _safeSetState((s) => s.copyWith(currentFrame: frame));
     };
 
     // 接続状態コールバック
     _webrtcService!.onConnectionStateChange = (stateStr) {
+      if (_channel == null) return;
       print('[WebRTC] Connection state: $stateStr');
-      state = state.copyWith(webrtcConnectionState: stateStr);
+      _safeSetState((s) => s.copyWith(webrtcConnectionState: stateStr));
     };
 
     // ICE候補コールバック（サーバーに送信）
     _webrtcService!.onIceCandidate = (candidateStr) {
+      if (_channel == null) return;
       print('[WebRTC] Sending ICE candidate');
       _send({
         'type': 'webrtc_ice_candidate',
@@ -393,7 +424,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
     // サーバーにWebRTC開始を要求
     _send({'type': 'start_webrtc'});
-    state = state.copyWith(isWebRTCActive: true, isScreenSharing: true);
+    _safeSetState((s) => s.copyWith(isWebRTCActive: true, isScreenSharing: true));
   }
 
   // WebRTC画面共有停止
@@ -401,12 +432,12 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     _send({'type': 'stop_webrtc'});
     _webrtcService?.close();
     _webrtcService = null;
-    state = state.copyWith(
+    _safeSetState((s) => s.copyWith(
       isWebRTCActive: false,
       isScreenSharing: false,
       currentFrame: null,
       webrtcConnectionState: null,
-    );
+    ));
   }
 
   void sendMouseMove(int x, int y) {
@@ -499,7 +530,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   void focusApp(String appName) {
     // ターゲットアプリを保存
-    state = state.copyWith(targetApp: appName);
+    _safeSetState((s) => s.copyWith(targetApp: appName));
     _send({
       'type': 'focus_app',
       'app_name': appName,
@@ -576,7 +607,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   void activateTerminalTab(String appName, int windowIndex, int tabIndex) {
     // ターゲットアプリを保存
-    state = state.copyWith(targetApp: '$appName (Window $windowIndex, Tab $tabIndex)');
+    _safeSetState((s) => s.copyWith(targetApp: '$appName (Window $windowIndex, Tab $tabIndex)'));
     _send({
       'type': 'activate_terminal_tab',
       'app_name': appName,
@@ -596,7 +627,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   // 特定のウィンドウをフォーカス
   void focusAppWindow(String appName, int windowIndex) {
     // ターゲットアプリを保存
-    state = state.copyWith(targetApp: appName);
+    _safeSetState((s) => s.copyWith(targetApp: appName));
     _send({
       'type': 'focus_app_window',
       'app_name': appName,
@@ -642,7 +673,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   // アプリをフォーカスしてウィンドウ情報を取得
   void focusAndGetWindow(String appName) {
     // windowInfoをクリアして新しい値を待つ
-    state = state.copyWith(targetApp: appName, clearWindowInfo: true);
+    _safeSetState((s) => s.copyWith(targetApp: appName, clearWindowInfo: true));
     _send({
       'type': 'focus_and_get_window',
       'app_name': appName,
@@ -697,10 +728,90 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     }
   }
 
+  /// シェルコマンドを実行して結果を返す
+  Future<String> executeShellCommand(String command) async {
+    if (_channel == null) {
+      throw Exception('Not connected');
+    }
+
+    // 既存のCompleterがあればキャンセル
+    _shellCommandCompleter?.completeError('Cancelled');
+    _shellCommandCompleter = Completer<String>();
+
+    _send({
+      'type': 'shell_execute',
+      'command': command,
+    });
+
+    // タイムアウト30秒
+    return _shellCommandCompleter!.future.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () => 'Error: Command timed out',
+    );
+  }
+
+  /// PTYセッションを開始
+  void startPty() {
+    if (_channel == null) return;
+    _ptySessionActive = true;
+    _send({'type': 'pty_start'});
+  }
+
+  /// PTYに入力を送信
+  void sendPtyInput(String input) {
+    if (_channel == null || !_ptySessionActive) return;
+    _send({
+      'type': 'pty_input',
+      'input': input,
+    });
+  }
+
+  /// PTY履歴を取得
+  void getPtyHistory() {
+    if (_channel == null) return;
+    _send({'type': 'pty_get_history'});
+  }
+
+  /// PTYセッションがアクティブかどうか
+  bool get isPtyActive => _ptySessionActive;
+
+  /// 既存ターミナルウィンドウのコンテンツを取得（スクロールバック含む）
+  Future<String> getTerminalContent(String appName) async {
+    if (_channel == null) {
+      throw Exception('Not connected');
+    }
+
+    // 既存のCompleterがあり、まだ完了していなければキャンセル
+    if (_terminalContentCompleter != null && !_terminalContentCompleter!.isCompleted) {
+      _terminalContentCompleter!.completeError('Cancelled');
+    }
+    _terminalContentCompleter = Completer<String>();
+
+    _send({
+      'type': 'get_terminal_content',
+      'app_name': appName,
+    });
+
+    // タイムアウト10秒
+    return _terminalContentCompleter!.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => '',
+    );
+  }
+
+  /// 既存ターミナルコンテンツを取得（ストリーム通知も行う）
+  void requestTerminalContent(String appName) {
+    if (_channel == null) return;
+    _send({
+      'type': 'get_terminal_content',
+      'app_name': appName,
+    });
+  }
+
   void _onMessage(dynamic message) {
     // バイナリデータ（画面フレーム）の処理
     if (message is List<int>) {
-      state = state.copyWith(currentFrame: Uint8List.fromList(message));
+      _safeSetState((s) => s.copyWith(currentFrame: Uint8List.fromList(message)));
       return;
     }
 
@@ -719,15 +830,15 @@ class WebSocketService extends StateNotifier<WebSocketState> {
             if (data['screen_info'] != null) {
               screenInfo = ScreenInfo.fromJson(data['screen_info'] as Map<String, dynamic>);
             }
-            state = state.copyWith(
+            _safeSetState((s) => s.copyWith(
               connectionState: WsConnectionState.connected,
               screenInfo: screenInfo,
-            );
+            ));
           } else {
-            state = state.copyWith(
+            _safeSetState((s) => s.copyWith(
               connectionState: WsConnectionState.error,
               errorMessage: '認証に失敗しました',
-            );
+            ));
           }
           break;
 
@@ -736,14 +847,54 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final commands = commandsJson
               .map((c) => Command.fromJson(c as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(commands: commands);
+          _safeSetState((s) => s.copyWith(commands: commands));
           break;
 
         case 'execute_result':
-          state = state.copyWith(
+          _safeSetState((s) => s.copyWith(
             lastOutput: data['output'] as String,
             lastSuccess: data['success'] as bool,
-          );
+          ));
+          break;
+
+        case 'shell_execute_result':
+          // シェルコマンド実行結果
+          final output = data['output'] as String? ?? '';
+          final success = data['success'] as bool? ?? false;
+          if (_shellCommandCompleter != null && !_shellCommandCompleter!.isCompleted) {
+            if (success) {
+              _shellCommandCompleter!.complete(output);
+            } else {
+              _shellCommandCompleter!.complete('Error: $output');
+            }
+          }
+          break;
+
+        case 'pty_output':
+          // PTY出力（リアルタイムストリーム）
+          final output = data['output'] as String? ?? '';
+          _ptyOutputController.add(output);
+          break;
+
+        case 'pty_history':
+          // PTY履歴（接続時に過去のログを受信）
+          final history = data['history'] as String? ?? '';
+          if (history.isNotEmpty) {
+            _ptyOutputController.add(history);
+          }
+          break;
+
+        case 'terminal_content':
+          // 既存ターミナルのコンテンツ（スクロールバック含む）
+          final content = data['content'] as String? ?? '';
+          final appName = data['app_name'] as String? ?? '';
+          print('[WebSocket] Received terminal_content for $appName: ${content.length} chars');
+          // ストリームに通知
+          _terminalContentController.add(content);
+          // Completerがあれば完了
+          if (_terminalContentCompleter != null && !_terminalContentCompleter!.isCompleted) {
+            _terminalContentCompleter!.complete(content);
+          }
           break;
 
         case 'running_apps':
@@ -751,7 +902,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final apps = appsJson
               .map((a) => RunningApp.fromJson(a as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(runningApps: apps);
+          _safeSetState((s) => s.copyWith(runningApps: apps));
           break;
 
         case 'directory_contents':
@@ -759,10 +910,10 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final entries = entriesJson
               .map((e) => FileEntry.fromJson(e as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(
+          _safeSetState((s) => s.copyWith(
             directoryContents: entries,
             currentDirectory: data['path'] as String,
-          );
+          ));
           break;
 
         case 'focus_result':
@@ -777,7 +928,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final tabs = tabsJson
               .map((t) => BrowserTab.fromJson(t as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(browserTabs: tabs);
+          _safeSetState((s) => s.copyWith(browserTabs: tabs));
           break;
 
         case 'terminal_tabs':
@@ -785,7 +936,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final tabs = tabsJson
               .map((t) => TerminalTab.fromJson(t as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(terminalTabs: tabs);
+          _safeSetState((s) => s.copyWith(terminalTabs: tabs));
           break;
 
         case 'app_windows':
@@ -793,7 +944,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final windows = windowsJson
               .map((w) => WindowListItem.fromJson(w as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(appWindows: windows);
+          _safeSetState((s) => s.copyWith(appWindows: windows));
           break;
 
         case 'messages_chats':
@@ -801,21 +952,21 @@ class WebSocketService extends StateNotifier<WebSocketState> {
           final chats = chatsJson
               .map((c) => MessagesChat.fromJson(c as Map<String, dynamic>))
               .toList();
-          state = state.copyWith(messagesChats: chats);
+          _safeSetState((s) => s.copyWith(messagesChats: chats));
           break;
 
         case 'window_info':
           final infoJson = data['info'];
           if (infoJson != null) {
             final info = AppWindowInfo.fromJson(infoJson as Map<String, dynamic>);
-            state = state.copyWith(windowInfo: info);
+            _safeSetState((s) => s.copyWith(windowInfo: info));
           }
           break;
 
         case 'mouse_position':
           final x = data['x'] as int;
           final y = data['y'] as int;
-          state = state.copyWith(pcMousePosition: MousePosition(x: x, y: y));
+          _safeSetState((s) => s.copyWith(pcMousePosition: MousePosition(x: x, y: y)));
           break;
 
         // WebRTCシグナリング
@@ -872,15 +1023,27 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   void _onError(dynamic error) {
     print('[WebSocket] Error: $error');
-    state = state.copyWith(
+    _safeSetState((s) => s.copyWith(
       connectionState: WsConnectionState.error,
       errorMessage: error.toString(),
-    );
+    ));
   }
 
   void _onDone() {
     print('[WebSocket] Connection closed (onDone)');
-    state = state.copyWith(connectionState: WsConnectionState.disconnected);
+    // 接続中に切断された場合は認証失敗の可能性が高い
+    if (state.connectionState == WsConnectionState.connecting) {
+      print('[WebSocket] Connection closed during auth - likely auth failure');
+      _safeSetState((s) => s.copyWith(
+        connectionState: WsConnectionState.error,
+        errorMessage: '認証に失敗しました。QRコードを再スキャンしてください。',
+      ));
+    } else {
+      _safeSetState((s) => s.copyWith(connectionState: WsConnectionState.disconnected));
+    }
+    // 接続情報をクリア
+    _connectionInfo = null;
+    _channel = null;
   }
 }
 

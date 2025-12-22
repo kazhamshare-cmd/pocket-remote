@@ -40,6 +40,13 @@ reqwest = { version = "0.12", features = ["blocking", "stream"] }
 flate2 = "1.0"
 tar = "0.4"
 
+# PTY（疑似ターミナル）サポート
+portable-pty = "0.8"
+
+# H.264エンコーディング
+openh264 = { version = "0.6", features = ["source"] }
+once_cell = "1.19"
+
 # macOS アクセシビリティ権限チェック
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

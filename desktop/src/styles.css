@@ -484,8 +484,8 @@ h2 {
 
 .dialog-buttons {
   display: flex;
-  gap: 1rem;
-  justify-content: center;
+  flex-direction: column;
+  gap: 0.75rem;
   margin-bottom: 1rem;
 }
 
@@ -493,12 +493,14 @@ h2 {
   background: linear-gradient(135deg, #4caf50, #45a049);
   color: white;
   border: none;
-  padding: 0.75rem 2rem;
-  border-radius: 8px;
+  padding: 1.25rem 2rem;
+  border-radius: 12px;
   font-weight: bold;
-  font-size: 1rem;
+  font-size: 1.2rem;
   cursor: pointer;
   transition: transform 0.2s, box-shadow 0.2s;
+  min-height: 56px;
+  width: 100%;
 }
 
 .approve-button:hover {
@@ -506,21 +508,32 @@ h2 {
   box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
 }
 
+.approve-button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
+}
+
 .deny-button {
   background: var(--bg-primary);
   color: var(--text-secondary);
   border: 2px solid var(--accent);
-  padding: 0.75rem 2rem;
-  border-radius: 8px;
+  padding: 1rem 2rem;
+  border-radius: 12px;
   font-weight: bold;
   font-size: 1rem;
   cursor: pointer;
   transition: all 0.2s;
+  min-height: 48px;
+  width: 100%;
 }
 
 .deny-button:hover {
   background: var(--accent);
   color: var(--text-primary);
+}
+
+.deny-button:active {
+  background: var(--accent);
 }
 
 .dialog-timeout {

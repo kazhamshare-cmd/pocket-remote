@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, RwLock};
 use parking_lot::RwLock as ParkingRwLock;
+use parking_lot::Mutex as ParkingMutex;
 use rayon::prelude::*;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -19,6 +21,34 @@ use std::io::ErrorKind::WouldBlock;
 use image::{ImageBuffer, Rgba, DynamicImage};
 use bytes::Bytes;
 use crate::CaptureRegion;
+use crate::h264_encoder::H264Encoder;
+use once_cell::sync::Lazy;
+
+/// エンコーディングモード
+#[derive(Clone, Copy, PartialEq)]
+pub enum EncodingMode {
+    Jpeg,
+    H264,
+}
+
+/// グローバルH.264エンコーダー（スレッドセーフ）
+static H264_ENCODER: Lazy<ParkingMutex<Option<H264Encoder>>> = Lazy::new(|| {
+    ParkingMutex::new(None)
+});
+
+/// 現在のエンコーディングモード
+static ENCODING_MODE: Lazy<ParkingRwLock<EncodingMode>> = Lazy::new(|| {
+    ParkingRwLock::new(EncodingMode::H264) // デフォルトはH.264
+});
+
+/// Data Channel開通時にキーフレームを強制するフラグ
+static FORCE_KEYFRAME: AtomicBool = AtomicBool::new(false);
+
+/// キーフレームを強制するフラグをセット
+pub fn request_keyframe() {
+    FORCE_KEYFRAME.store(true, Ordering::SeqCst);
+    println!("[H264] Keyframe requested");
+}
 
 /// WebRTC Data Channelを使った低遅延画面共有
 pub struct WebRTCScreenShare {
@@ -87,6 +117,8 @@ impl WebRTCScreenShare {
         let dc_holder_clone = Arc::clone(&data_channel_holder);
         data_channel.on_open(Box::new(move || {
             println!("[WebRTC] Data channel opened!");
+            // キーフレームを強制送信（H.264デコーダー初期化のため）
+            request_keyframe();
             Box::pin(async {})
         }));
 
@@ -289,22 +321,26 @@ async fn capture_loop(
                         }
                     }
 
-                    // フレームをエンコード
+                    // フレームをエンコード（JPEG or H.264、複数パケット対応）
                     let encode_start = Instant::now();
-                    if let Some(encoded) = encode_frame(&frame, width, height, region, frame_count) {
+                    if let Some(packets) = encode_frame_auto(&frame, width, height, region, frame_count) {
                         let encode_time = encode_start.elapsed();
                         if let Some(ref dc) = dc {
                             // Data Channelが開いているか確認
                             let dc_state = dc.ready_state();
                             if dc_state == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-                                let data = Bytes::from(encoded);
-                                let data_len = data.len();
+                                let total_size: usize = packets.iter().map(|p| p.len()).sum();
+                                let packet_count = packets.len();
 
-                                // 送信（ブロッキング、安定性重視）
+                                // 各パケットを送信
                                 rt.block_on(async {
-                                    if let Err(e) = dc.send(&data).await {
-                                        if frame_count % 30 == 0 {
-                                            eprintln!("[WebRTC] Send error: {} (size: {} KB)", e, data_len / 1024);
+                                    for packet in packets {
+                                        let data = Bytes::from(packet);
+                                        if let Err(e) = dc.send(&data).await {
+                                            if frame_count % 30 == 0 {
+                                                eprintln!("[WebRTC] Send error: {} (size: {} KB)", e, data.len() / 1024);
+                                            }
+                                            break;
                                         }
                                     }
                                 });
@@ -314,8 +350,9 @@ async fn capture_loop(
                                 if frame_count <= 10 || frame_count % 100 == 0 {
                                     let elapsed = last_send_time.elapsed();
                                     let fps = if frame_count > 1 { (frame_count as f64) / elapsed.as_secs_f64() } else { 0.0 };
-                                    println!("[WebRTC] Frame {} sent ({} KB), {:.1} fps, capture={:?}, encode={:?}",
-                                        frame_count, data_len / 1024, fps, capture_time, encode_time);
+                                    let mode_str = if get_encoding_mode() == EncodingMode::H264 { "H264" } else { "JPEG" };
+                                    println!("[WebRTC] Frame {} sent ({} KB, {} packets, {}), {:.1} fps, capture={:?}, encode={:?}",
+                                        frame_count, total_size / 1024, packet_count, mode_str, fps, capture_time, encode_time);
                                     if frame_count == 100 {
                                         last_send_time = Instant::now();
                                     }
@@ -514,6 +551,165 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
             quality = quality.saturating_sub(5); // 5%刻みで細かく調整
         } else {
             return None;
+        }
+    }
+}
+
+/// エンコーディングモードを設定
+pub fn set_encoding_mode(mode: EncodingMode) {
+    let mut current_mode = ENCODING_MODE.write();
+    *current_mode = mode;
+    println!("[WebRTC] Encoding mode set to: {:?}",
+        match mode {
+            EncodingMode::Jpeg => "JPEG",
+            EncodingMode::H264 => "H.264",
+        });
+}
+
+/// 現在のエンコーディングモードを取得
+pub fn get_encoding_mode() -> EncodingMode {
+    *ENCODING_MODE.read()
+}
+
+/// H.264でフレームをエンコード（BGRAデータを直接受け取る）
+/// Data Channelの64KB制限に対応するため、フラグメントに分割して返す
+fn encode_frame_h264(bgra_data: &[u8], width: u32, height: u32, frame_count: u64) -> Option<Vec<Vec<u8>>> {
+    let should_log = frame_count < 10 || frame_count % 100 == 0;
+
+    // H.264エンコーダーを取得または作成
+    let mut encoder_guard = H264_ENCODER.lock();
+    if encoder_guard.is_none() {
+        match H264Encoder::new(width, height) {
+            Ok(encoder) => {
+                println!("[H264] Encoder initialized: {}x{}", width, height);
+                *encoder_guard = Some(encoder);
+            }
+            Err(e) => {
+                eprintln!("[H264] Failed to create encoder: {}", e);
+                return None;
+            }
+        }
+    }
+
+    let encoder = encoder_guard.as_mut()?;
+
+    // キーフレーム強制フラグをチェック
+    if FORCE_KEYFRAME.swap(false, Ordering::SeqCst) {
+        println!("[H264] Forcing keyframe (Data Channel opened)");
+        let _ = encoder.force_keyframe();
+    }
+
+    // H.264エンコード（BGRAを直接渡す）
+    let encode_start = Instant::now();
+    let h264_data = match encoder.encode_bgra(bgra_data, width, height) {
+        Ok(data) => data,
+        Err(e) => {
+            if should_log {
+                eprintln!("[H264] Encode error: {}", e);
+            }
+            return None;
+        }
+    };
+
+    if should_log {
+        println!("[H264] Encoded frame {}: {} bytes in {:?}",
+            frame_count, h264_data.len(), encode_start.elapsed());
+    }
+
+    // 空のフレーム（Pフレームでスキップされた場合など）
+    if h264_data.is_empty() {
+        return Some(vec![]);
+    }
+
+    // 64KB以下なら1つのパケットで送信
+    let max_packet_size = 60 * 1024; // 60KB（余裕を持たせる）
+    if h264_data.len() <= max_packet_size {
+        // ヘッダー: [0x01] = H.264 single packet
+        let mut packet = Vec::with_capacity(h264_data.len() + 1);
+        packet.push(0x01); // H.264 single packet marker
+        packet.extend_from_slice(&h264_data);
+        return Some(vec![packet]);
+    }
+
+    // 大きいフレームはフラグメントに分割
+    // ヘッダー: [0x02, fragment_index, total_fragments, frame_id(2bytes)]
+    let frame_id = (frame_count & 0xFFFF) as u16;
+    let total_fragments = ((h264_data.len() + max_packet_size - 1) / max_packet_size) as u8;
+    let mut fragments = Vec::new();
+
+    for (i, chunk) in h264_data.chunks(max_packet_size).enumerate() {
+        let mut packet = Vec::with_capacity(chunk.len() + 5);
+        packet.push(0x02); // H.264 fragment marker
+        packet.push(i as u8); // fragment index
+        packet.push(total_fragments); // total fragments
+        packet.extend_from_slice(&frame_id.to_be_bytes()); // frame ID
+        packet.extend_from_slice(chunk);
+        fragments.push(packet);
+    }
+
+    if should_log && fragments.len() > 1 {
+        println!("[H264] Frame fragmented into {} packets", fragments.len());
+    }
+
+    Some(fragments)
+}
+
+/// 統合エンコード関数（モードに応じてJPEGまたはH.264を使用）
+pub fn encode_frame_auto(
+    bgra: &[u8],
+    width: usize,
+    height: usize,
+    region: Option<CaptureRegion>,
+    frame_count: u64
+) -> Option<Vec<Vec<u8>>> {
+    let mode = get_encoding_mode();
+
+    match mode {
+        EncodingMode::Jpeg => {
+            // JPEG: 1パケットで返す
+            encode_frame(bgra, width, height, region, frame_count)
+                .map(|data| {
+                    // ヘッダー: [0x00] = JPEG packet
+                    let mut packet = Vec::with_capacity(data.len() + 1);
+                    packet.push(0x00); // JPEG marker
+                    packet.extend_from_slice(&data);
+                    vec![packet]
+                })
+        }
+        EncodingMode::H264 => {
+            // クロップしてBGRAデータを抽出
+            let (crop_x, crop_y, crop_w, crop_h) = match &region {
+                Some(r) => {
+                    let x = (r.x as usize).min(width.saturating_sub(1));
+                    let y = (r.y as usize).min(height.saturating_sub(1));
+                    let w = (r.width as usize).min(width.saturating_sub(x));
+                    let h = (r.height as usize).min(height.saturating_sub(y));
+                    (x, y, w, h)
+                }
+                None => (0, 0, width, height),
+            };
+
+            if crop_w == 0 || crop_h == 0 {
+                return None;
+            }
+
+            // macOS IOSurfaceは128バイトアライメントを使用
+            let bytes_per_pixel = 4;
+            let row_bytes = width * bytes_per_pixel;
+            let alignment = 128;
+            let actual_stride = ((row_bytes + alignment - 1) / alignment) * alignment;
+
+            // BGRAデータを抽出（クロップ領域のみ）
+            let mut bgra_data = Vec::with_capacity(crop_w * crop_h * 4);
+            for y in crop_y..(crop_y + crop_h) {
+                let row_start = y * actual_stride + crop_x * bytes_per_pixel;
+                let row_end = row_start + crop_w * bytes_per_pixel;
+                if row_end <= bgra.len() {
+                    bgra_data.extend_from_slice(&bgra[row_start..row_end]);
+                }
+            }
+
+            encode_frame_h264(&bgra_data, crop_w as u32, crop_h as u32, frame_count)
         }
     }
 }

@@ -70,14 +70,14 @@ class L10n {
   // ===== Scan Screen =====
   String get scanQRCode => language == AppLanguage.ja ? 'QRコードをスキャン' : 'Scan QR Code';
   String get connectToPC => language == AppLanguage.ja ? 'PCに接続' : 'Connect to PC';
-  String get manualConnection => language == AppLanguage.ja ? '手動接続' : 'Manual Connection';
+  String get manualConnection => '手動接続 / Manual Connection';
   String get connectionSettings => language == AppLanguage.ja ? '接続設定' : 'Connection Settings';
-  String get localConnection => language == AppLanguage.ja ? 'ローカル' : 'Local';
-  String get externalConnection => language == AppLanguage.ja ? '外部接続' : 'External';
-  String get ipAddress => language == AppLanguage.ja ? 'IPアドレス' : 'IP Address';
-  String get port => language == AppLanguage.ja ? 'ポート' : 'Port';
-  String get token => language == AppLanguage.ja ? 'トークン' : 'Token';
-  String get hostname => language == AppLanguage.ja ? 'ホスト名' : 'Hostname';
+  String get localConnection => 'LAN';
+  String get externalConnection => 'Internet';
+  String get ipAddress => 'IP Address';
+  String get port => 'Port';
+  String get token => 'Token';
+  String get hostname => 'Hostname';
   String get connect => language == AppLanguage.ja ? '接続' : 'Connect';
   String get cancel => language == AppLanguage.ja ? 'キャンセル' : 'Cancel';
   String get connecting => language == AppLanguage.ja ? '接続中...' : 'Connecting...';
@@ -157,6 +157,7 @@ class L10n {
   String get window => language == AppLanguage.ja ? 'ウィンドウ' : 'Window';
   String get tab => language == AppLanguage.ja ? 'タブ' : 'Tab';
   String get busy => language == AppLanguage.ja ? '実行中' : 'Running';
+  String get newTerminal => language == AppLanguage.ja ? '新規' : 'New';
 
   // 特殊キー
   String get enter => 'Enter';

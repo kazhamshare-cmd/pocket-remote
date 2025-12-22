@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -59,7 +58,7 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
       state = state.copyWith(
         isAvailable: false,
         isLoading: false,
-        errorMessage: 'ストアに接続できません',
+        errorMessage: 'Store not available / ストアに接続できません',
       );
       return;
     }
@@ -127,7 +126,7 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
         if (purchase.status == PurchaseStatus.error) {
           state = state.copyWith(
             isLoading: false,
-            errorMessage: purchase.error?.message ?? '購入に失敗しました',
+            errorMessage: purchase.error?.message ?? 'Purchase failed / 購入に失敗しました',
           );
         } else if (purchase.status == PurchaseStatus.purchased ||
             purchase.status == PurchaseStatus.restored) {
@@ -163,7 +162,7 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
 
   Future<bool> purchase() async {
     if (state.product == null) {
-      state = state.copyWith(errorMessage: '商品が見つかりません');
+      state = state.copyWith(errorMessage: 'Product not found / 商品が見つかりません');
       return false;
     }
 
@@ -174,7 +173,7 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
       final success = await _inAppPurchase.buyNonConsumable(purchaseParam: purchaseParam);
 
       if (!success) {
-        state = state.copyWith(isLoading: false, errorMessage: '購入を開始できませんでした');
+        state = state.copyWith(isLoading: false, errorMessage: 'Could not start purchase / 購入を開始できませんでした');
         return false;
       }
 
@@ -187,7 +186,7 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
 
       return true;
     } catch (e) {
-      state = state.copyWith(isLoading: false, errorMessage: '購入エラー: $e');
+      state = state.copyWith(isLoading: false, errorMessage: 'Purchase error / 購入エラー: $e');
       return false;
     }
   }
@@ -203,14 +202,14 @@ class SubscriptionNotifier extends StateNotifier<SubscriptionState> {
         if (state.isLoading) {
           state = state.copyWith(
             isLoading: false,
-            errorMessage: '購入履歴はありません',
+            errorMessage: 'No purchase history / 購入履歴はありません',
           );
         }
       });
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
-        errorMessage: '復元に失敗しました: $e',
+        errorMessage: 'Restore failed / 復元に失敗しました: $e',
       );
     }
   }

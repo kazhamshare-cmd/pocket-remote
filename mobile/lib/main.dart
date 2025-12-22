@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'screens/scan_screen.dart';
 import 'screens/commands_screen.dart';
 import 'screens/screen_share_screen.dart';
+import 'screens/terminal_screen.dart';
 import 'screens/paywall_screen.dart';
 import 'screens/splash_screen.dart';
-import 'services/subscription_service.dart';
 
 final _router = GoRouter(
   initialLocation: '/splash',
@@ -50,12 +51,28 @@ final _router = GoRouter(
         return const ScreenShareScreen();
       },
     ),
+    GoRoute(
+      path: '/terminal',
+      builder: (context, state) {
+        print('[Router] Building TerminalScreen');
+        return const TerminalScreen();
+      },
+    ),
   ],
 );
 
-void main() {
+void main() async {
   print('[Main] App starting...');
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Firebase を初期化
+  try {
+    await Firebase.initializeApp();
+    print('[Main] Firebase initialized');
+  } catch (e) {
+    print('[Main] Firebase initialization error: $e');
+  }
+
   runApp(
     const ProviderScope(
       child: MyApp(),

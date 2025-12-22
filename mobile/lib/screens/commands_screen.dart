@@ -195,7 +195,7 @@ class _CommandsScreenState extends ConsumerState<CommandsScreen> {
               const SizedBox(height: 32),
               // 画面共有ボタン
               ElevatedButton.icon(
-                onPressed: () => context.go('/screen'),
+                onPressed: () => context.push('/screen'),
                 icon: const Icon(Icons.play_arrow),
                 label: Text(l10n.startScreenShare),
                 style: ElevatedButton.styleFrom(

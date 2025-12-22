@@ -3,6 +3,8 @@ mod input_control;
 mod system_control;
 mod accessibility;
 mod webrtc_screen;
+mod pty_session;
+mod h264_encoder;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
@@ -21,7 +23,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use screen_capture::ScreenCapturer;
 use input_control::{InputController, InputEvent, get_mouse_position};
 use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, TerminalTab, AppWindowInfo, WindowListItem, MessagesChat};
-use webrtc_screen::WebRTCScreenShare;
+use webrtc_screen::{WebRTCScreenShare, EncodingMode, set_encoding_mode, get_encoding_mode};
 
 // 接続情報
 #[derive(Clone, Serialize)]
@@ -92,6 +94,11 @@ enum WsMessage {
     // スクロール（ブラウザ等用）
     #[serde(rename = "scroll")]
     Scroll { direction: String, amount: i32 },
+    // エンコーディングモード切り替え
+    #[serde(rename = "set_encoding_mode")]
+    SetEncodingMode { mode: String }, // "jpeg" or "h264"
+    #[serde(rename = "encoding_mode")]
+    EncodingModeResponse { mode: String },
     // マウス位置
     #[serde(rename = "mouse_position")]
     MousePosition { x: i32, y: i32 },
@@ -123,6 +130,11 @@ enum WsMessage {
     ActivateTab { app_name: String, tab_index: usize },
     #[serde(rename = "activate_tab_result")]
     ActivateTabResult { success: bool },
+    // シェルコマンド実行
+    #[serde(rename = "shell_execute")]
+    ShellExecute { command: String },
+    #[serde(rename = "shell_execute_result")]
+    ShellExecuteResult { output: String, success: bool },
     // AppleScriptテキスト入力（より信頼性が高い）
     #[serde(rename = "type_text")]
     TypeText { text: String },
@@ -178,6 +190,22 @@ enum WsMessage {
     StartWebRTC,
     #[serde(rename = "stop_webrtc")]
     StopWebRTC,
+    // PTY（永続ターミナルセッション）
+    #[serde(rename = "pty_start")]
+    PtyStart,
+    #[serde(rename = "pty_input")]
+    PtyInput { input: String },
+    #[serde(rename = "pty_output")]
+    PtyOutput { output: String },
+    #[serde(rename = "pty_history")]
+    PtyHistory { history: String },
+    #[serde(rename = "pty_get_history")]
+    PtyGetHistory,
+    // ターミナルコンテンツ取得（既存ターミナルの内容をキャプチャ）
+    #[serde(rename = "get_terminal_content")]
+    GetTerminalContent { app_name: String },
+    #[serde(rename = "terminal_content")]
+    TerminalContent { content: String, app_name: String },
 }
 
 // トンネル情報
@@ -310,6 +338,10 @@ async fn handle_connection(
     let mut webrtc_session: Option<Arc<WebRTCScreenShare>> = None;
     let (ice_tx, mut ice_rx) = mpsc::channel::<String>(100);
 
+    // PTY（永続ターミナル）セッション
+    let mut pty_session: Option<pty_session::PtySession> = None;
+    let mut pty_output_rx: Option<mpsc::Receiver<String>> = None;
+
     loop {
         tokio::select! {
             // フレーム送信
@@ -334,6 +366,22 @@ async fn handle_connection(
                     let response = WsMessage::WebRTCIceCandidate { candidate };
                     let json = serde_json::to_string(&response).unwrap();
                     write.lock().await.send(Message::Text(json.into())).await.ok();
+                }
+            }
+
+            // PTY出力をモバイルへストリーミング
+            pty_output = async {
+                if let Some(ref mut rx) = pty_output_rx {
+                    rx.recv().await
+                } else {
+                    std::future::pending::<Option<String>>().await
+                }
+            } => {
+                if let Some(output) = pty_output {
+                    let response = WsMessage::PtyOutput { output };
+                    if let Ok(json) = serde_json::to_string(&response) {
+                        write.lock().await.send(Message::Text(json.into())).await.ok();
+                    }
                 }
             }
 
@@ -546,6 +594,23 @@ async fn handle_connection(
                                 println!("Scroll: {} by {}", direction, amount);
                                 state.input_controller.scroll(&direction, amount);
                             }
+                            Ok(WsMessage::SetEncodingMode { mode }) if authenticated => {
+                                println!("[SetEncodingMode] Requested: {}", mode);
+                                let encoding_mode = match mode.to_lowercase().as_str() {
+                                    "h264" | "h.264" => EncodingMode::H264,
+                                    _ => EncodingMode::Jpeg,
+                                };
+                                set_encoding_mode(encoding_mode);
+                                // 現在のモードを返す
+                                let current_mode = match get_encoding_mode() {
+                                    EncodingMode::H264 => "h264",
+                                    EncodingMode::Jpeg => "jpeg",
+                                };
+                                let response = WsMessage::EncodingModeResponse { mode: current_mode.to_string() };
+                                if let Ok(json) = serde_json::to_string(&response) {
+                                    write.lock().await.send(Message::Text(json.into())).await.ok();
+                                }
+                            }
                             Ok(WsMessage::Input(event)) if authenticated => {
                                 // スクロールはユーザーがタッチした位置で実行
                                 // （マウスは既にその位置に移動済み）
@@ -557,9 +622,29 @@ async fn handle_connection(
                                 let write_clone = write.clone();
                                 tokio::spawn(async move {
                                     let apps = tokio::task::spawn_blocking(|| {
-                                        SystemController::get_running_apps()
+                                        // GUIアプリを取得（高速）
+                                        let mut all_apps = SystemController::get_running_apps();
+                                        // ターミナルアプリをis_cli: trueに設定（CLIセクションに表示するため）
+                                        let terminal_apps = ["Terminal", "iTerm", "iTerm2", "Warp", "Hyper", "Alacritty", "kitty"];
+                                        for app in &mut all_apps {
+                                            if terminal_apps.iter().any(|t| app.name == *t) {
+                                                app.is_cli = true;
+                                            }
+                                        }
+                                        // CLIツールを検出（起動中のターミナルのみチェック）
+                                        let cli_tools = SystemController::get_cli_tools_fast(&all_apps);
+                                        // CLIツールを先頭に追加、重複を排除
+                                        let mut combined = cli_tools;
+                                        let mut seen_names: std::collections::HashSet<String> = combined.iter().map(|a| a.name.clone()).collect();
+                                        for app in all_apps {
+                                            if !seen_names.contains(&app.name) {
+                                                seen_names.insert(app.name.clone());
+                                                combined.push(app);
+                                            }
+                                        }
+                                        combined
                                     }).await.unwrap_or_default();
-                                    println!("GetRunningApps result: {} apps", apps.len());
+                                    println!("GetRunningApps result: {} apps (including CLI tools)", apps.len());
                                     let response = WsMessage::RunningApps { apps };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write_clone.lock().await.send(Message::Text(json.into())).await.ok();
@@ -617,19 +702,28 @@ async fn handle_connection(
                                 });
                             }
                             Ok(WsMessage::ActivateTab { app_name, tab_index }) if authenticated => {
+                                println!("[ActivateTab] Start: {} tab {}", app_name, tab_index);
+                                let start = std::time::Instant::now();
                                 let name = app_name.clone();
                                 let write_clone = write.clone();
                                 tokio::spawn(async move {
-                                    tokio::task::spawn_blocking(move || {
-                                        if name.to_lowercase().contains("safari") {
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        let activated = if name.to_lowercase().contains("safari") {
                                             SystemController::activate_safari_tab(tab_index)
                                         } else if name.to_lowercase().contains("chrome") {
                                             SystemController::activate_chrome_tab(tab_index)
                                         } else {
                                             false
+                                        };
+                                        // タブ切り替え後にウィンドウを左上に移動
+                                        if activated {
+                                            std::thread::sleep(std::time::Duration::from_millis(100));
+                                            SystemController::move_window_to_top_left(None, None);
                                         }
-                                    }).await.ok();
-                                    let response = WsMessage::ActivateTabResult { success: true };
+                                        activated
+                                    }).await.unwrap_or(false);
+                                    println!("[ActivateTab] Done in {:?}, success: {}", start.elapsed(), result);
+                                    let response = WsMessage::ActivateTabResult { success: result };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write_clone.lock().await.send(Message::Text(json.into())).await.ok();
                                 });
@@ -652,6 +746,45 @@ async fn handle_connection(
                                 let id = chat_id.clone();
                                 tokio::task::spawn_blocking(move || {
                                     SystemController::open_messages_chat(&id);
+                                });
+                            }
+                            Ok(WsMessage::ShellExecute { command }) if authenticated => {
+                                println!("[Shell] Executing: {}", command);
+                                let write_clone = write.clone();
+                                // シェルコマンドを別スレッドで実行
+                                tokio::spawn(async move {
+                                    let output = tokio::task::spawn_blocking(move || {
+                                        std::process::Command::new("sh")
+                                            .arg("-c")
+                                            .arg(&command)
+                                            .output()
+                                    }).await;
+
+                                    let (result_output, success) = match output {
+                                        Ok(Ok(out)) => {
+                                            let stdout = String::from_utf8_lossy(&out.stdout);
+                                            let stderr = String::from_utf8_lossy(&out.stderr);
+                                            let combined = if stderr.is_empty() {
+                                                stdout.to_string()
+                                            } else if stdout.is_empty() {
+                                                stderr.to_string()
+                                            } else {
+                                                format!("{}\n{}", stdout, stderr)
+                                            };
+                                            (combined, out.status.success())
+                                        }
+                                        Ok(Err(e)) => (format!("Failed to execute: {}", e), false),
+                                        Err(e) => (format!("Task failed: {}", e), false),
+                                    };
+
+                                    println!("[Shell] Result (success={}): {} chars", success, result_output.len());
+                                    let response = WsMessage::ShellExecuteResult {
+                                        output: result_output,
+                                        success,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&response) {
+                                        write_clone.lock().await.send(Message::Text(json.into())).await.ok();
+                                    }
                                 });
                             }
                             Ok(WsMessage::TypeText { text }) if authenticated => {
@@ -856,6 +989,64 @@ async fn handle_connection(
                                 }
                                 // WSキャプチャを再開
                                 state.ws_capture_running.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            // PTY（永続ターミナル）セッション開始
+                            Ok(WsMessage::PtyStart) if authenticated => {
+                                println!("[PTY] Starting PTY session...");
+                                match pty_session::PtySession::new() {
+                                    Ok(handle) => {
+                                        // まず履歴を送信
+                                        let history = handle.session.get_history_text();
+                                        if !history.is_empty() {
+                                            let response = WsMessage::PtyHistory { history };
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                write.lock().await.send(Message::Text(json.into())).await.ok();
+                                            }
+                                        }
+                                        pty_session = Some(handle.session);
+                                        pty_output_rx = Some(handle.output_rx);
+                                        println!("[PTY] Session started with output streaming");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[PTY] Failed to start session: {}", e);
+                                    }
+                                }
+                            }
+                            // PTY入力
+                            Ok(WsMessage::PtyInput { input }) if authenticated => {
+                                if let Some(ref session) = pty_session {
+                                    if let Err(e) = session.write(&input) {
+                                        eprintln!("[PTY] Write error: {}", e);
+                                    }
+                                } else {
+                                    println!("[PTY] No active session for input");
+                                }
+                            }
+                            // PTY履歴取得
+                            Ok(WsMessage::PtyGetHistory) if authenticated => {
+                                if let Some(ref session) = pty_session {
+                                    let history = session.get_history_text();
+                                    let response = WsMessage::PtyHistory { history };
+                                    if let Ok(json) = serde_json::to_string(&response) {
+                                        write.lock().await.send(Message::Text(json.into())).await.ok();
+                                    }
+                                }
+                            }
+                            // ターミナルコンテンツ取得（既存ターミナルの内容をキャプチャ）
+                            Ok(WsMessage::GetTerminalContent { app_name }) if authenticated => {
+                                println!("[GetTerminalContent] Requested for app: {}", app_name);
+                                let name = app_name.clone();
+                                let write_clone = write.clone();
+                                tokio::spawn(async move {
+                                    let content = tokio::task::spawn_blocking(move || {
+                                        SystemController::get_terminal_content_for_app(&name)
+                                    }).await.unwrap_or_default();
+                                    println!("[GetTerminalContent] Got {} chars", content.len());
+                                    let response = WsMessage::TerminalContent { content, app_name };
+                                    if let Ok(json) = serde_json::to_string(&response) {
+                                        write_clone.lock().await.send(Message::Text(json.into())).await.ok();
+                                    }
+                                });
                             }
                             _ => {}
                         }

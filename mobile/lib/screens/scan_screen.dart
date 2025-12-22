@@ -1,7 +1,9 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/connection_info.dart';
 import '../services/websocket_service.dart';
 import '../services/localization_service.dart';
@@ -14,97 +16,44 @@ class ScanScreen extends ConsumerStatefulWidget {
 }
 
 class _ScanScreenState extends ConsumerState<ScanScreen> {
-  MobileScannerController? cameraController;
+  late final MobileScannerController cameraController;
   bool _isProcessing = false;
   bool _cameraError = false;
-  bool _isInitialized = false;
 
   @override
   void initState() {
     super.initState();
     print('[ScanScreen] initState called');
-    _initializeCamera();
+    // mobile_scanner 7.x: コントローラーを作成（ウィジェットにアタッチされたら自動起動）
+    cameraController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+    );
+    print('[ScanScreen] MobileScannerController created');
   }
 
-  Future<void> _initializeCamera() async {
-    print('[ScanScreen] _initializeCamera started');
-
-    // 既存のコントローラーがあれば破棄
-    if (cameraController != null) {
-      print('[ScanScreen] Disposing existing controller');
-      try {
-        await cameraController!.stop();
-        await cameraController!.dispose();
-      } catch (e) {
-        print('[ScanScreen] Error disposing controller: $e');
-      }
-      cameraController = null;
-    }
-
-    // 状態をリセット
-    if (mounted) {
-      setState(() {
-        _cameraError = false;
-        _isInitialized = false;
-      });
-    }
-
-    // カメラリソースの解放を待つ
-    await Future.delayed(const Duration(milliseconds: 300));
-
-    if (!mounted) return;
-
+  /// カメラを再起動
+  Future<void> _retryCamera() async {
+    print('[ScanScreen] Retrying camera');
+    setState(() {
+      _cameraError = false;
+    });
     try {
-      final controller = MobileScannerController(
-        detectionSpeed: DetectionSpeed.normal,
-        facing: CameraFacing.back,
-        autoStart: false, // 自動起動を無効化
-      );
-      print('[ScanScreen] MobileScannerController created');
-
-      // 明示的にカメラを起動
-      await controller.start();
-      print('[ScanScreen] Camera started successfully');
-
-      if (mounted) {
-        setState(() {
-          cameraController = controller;
-          _isInitialized = true;
-        });
-        print('[ScanScreen] Setting _isInitialized = true');
-      } else {
-        // マウントされていない場合はコントローラーを破棄
-        await controller.stop();
-        await controller.dispose();
-      }
-    } catch (e, stackTrace) {
-      print('[ScanScreen] Camera initialization error: $e');
-      print('[ScanScreen] Stack trace: $stackTrace');
+      await cameraController.start();
+    } catch (e) {
+      print('[ScanScreen] Camera retry error: $e');
       if (mounted) {
         setState(() {
           _cameraError = true;
-          _isInitialized = true;
         });
       }
     }
-  }
-
-  /// カメラを再初期化
-  Future<void> _retryCamera() async {
-    print('[ScanScreen] Retrying camera initialization');
-    await _initializeCamera();
   }
 
   @override
   void dispose() {
     print('[ScanScreen] dispose called');
-    final controller = cameraController;
-    cameraController = null;
-    if (controller != null) {
-      controller.stop().then((_) => controller.dispose()).catchError((e) {
-        print('[ScanScreen] Error in dispose: $e');
-      });
-    }
+    cameraController.dispose();
     super.dispose();
   }
 
@@ -127,8 +76,39 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
       final info = ConnectionInfo.fromQrData(data);
       await ref.read(webSocketProvider.notifier).connect(info);
 
+      // 接続結果を待つ（最大5秒）
+      for (int i = 0; i < 50 && mounted; i++) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        final state = ref.read(webSocketProvider);
+        if (state.connectionState == WsConnectionState.connected) {
+          context.push('/commands');
+          return;
+        } else if (state.connectionState == WsConnectionState.error) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(state.errorMessage ?? l10n.connectionFailed),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+          _isProcessing = false;
+          return;
+        } else if (state.connectionState == WsConnectionState.disconnected) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${l10n.connectionFailed}: 接続が切断されました'),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+          _isProcessing = false;
+          return;
+        }
+      }
+      // タイムアウト
       if (mounted) {
-        context.go('/commands');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${l10n.connectionFailed}: タイムアウト')),
+        );
+        _isProcessing = false;
       }
     } catch (e) {
       if (mounted) {
@@ -143,7 +123,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
   @override
   Widget build(BuildContext context) {
     final l10n = ref.watch(l10nProvider);
-    print('[ScanScreen] build called - _isInitialized: $_isInitialized, _cameraError: $_cameraError, cameraController: ${cameraController != null}');
+    print('[ScanScreen] build called - _cameraError: $_cameraError');
     return Scaffold(
       appBar: AppBar(
         title: const Column(
@@ -155,28 +135,17 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
         ),
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () => _showSettingsSheet(context, l10n),
+          ),
+        ],
       ),
       body: Stack(
         children: [
-          // ローディングまたはカメラ
-          if (!_isInitialized)
-            Container(
-              color: Colors.black,
-              child: Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const CircularProgressIndicator(color: Color(0xFFe94560)),
-                    const SizedBox(height: 16),
-                    Text(
-                      l10n.connecting,
-                      style: const TextStyle(color: Colors.white54, fontSize: 16),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          else if (_cameraError)
+          // カメラエラー時
+          if (_cameraError)
             Container(
               color: Colors.black,
               child: Center(
@@ -204,11 +173,11 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                 ),
               ),
             )
-          else if (cameraController != null)
+          else
             MobileScanner(
-              controller: cameraController!,
+              controller: cameraController,
               onDetect: _onDetect,
-              errorBuilder: (context, error, child) {
+              errorBuilder: (context, error) {
                 print('[ScanScreen] MobileScanner errorBuilder: ${error.errorCode}');
                 // エラー時は手動接続を促す
                 WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -235,19 +204,9 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                   ),
                 );
               },
-            )
-          else
-            Container(
-              color: Colors.black,
-              child: Center(
-                child: Text(
-                  l10n.connectionFailed,
-                  style: const TextStyle(color: Colors.white54),
-                ),
-              ),
             ),
           // スキャンフレーム
-          if (_isInitialized && !_cameraError)
+          if (!_cameraError)
             Center(
               child: Container(
                 width: 250,
@@ -427,6 +386,123 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  // 設定メニューを表示
+  void _showSettingsSheet(BuildContext context, L10n l10n) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF16213e),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // サブスク管理
+              ListTile(
+                leading: const Icon(Icons.subscriptions, color: Color(0xFFe94560)),
+                title: Text(l10n.manageSubscription, style: const TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openSubscriptionManagement();
+                },
+              ),
+              const Divider(color: Colors.white24),
+              // 利用規約
+              ListTile(
+                leading: const Icon(Icons.description, color: Colors.white70),
+                title: Text(l10n.termsOfUse, style: const TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showTermsDialog(context, l10n);
+                },
+              ),
+              // プライバシーポリシー
+              ListTile(
+                leading: const Icon(Icons.privacy_tip, color: Colors.white70),
+                title: Text(l10n.privacyPolicy, style: const TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showPrivacyDialog(context, l10n);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // サブスク管理を開く
+  Future<void> _openSubscriptionManagement() async {
+    final urlString = Platform.isIOS
+        ? 'https://apps.apple.com/account/subscriptions'
+        : 'https://play.google.com/store/account/subscriptions';
+    final url = Uri.parse(urlString);
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  // 利用規約ダイアログ
+  void _showTermsDialog(BuildContext context, L10n l10n) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF16213e),
+        title: Text(l10n.termsOfUse, style: const TextStyle(color: Colors.white)),
+        content: const SingleChildScrollView(
+          child: Text(
+            'RemoteTouch Monthly Subscription\n\n'
+            '- Payment will be charged to your Apple ID account at confirmation of purchase.\n'
+            '- Subscription automatically renews unless canceled at least 24 hours before the end of the current period.\n'
+            '- Your account will be charged for renewal within 24 hours prior to the end of the current period.\n'
+            '- You can manage and cancel your subscriptions by going to your account settings on the App Store after purchase.\n'
+            '- Any unused portion of a free trial period will be forfeited when you purchase a subscription.',
+            style: TextStyle(color: Colors.white70),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(l10n.close, style: const TextStyle(color: Color(0xFFe94560))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // プライバシーポリシーダイアログ
+  void _showPrivacyDialog(BuildContext context, L10n l10n) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF16213e),
+        title: Text(l10n.privacyPolicy, style: const TextStyle(color: Colors.white)),
+        content: const SingleChildScrollView(
+          child: Text(
+            'RemoteTouch Privacy Policy\n\n'
+            'We respect your privacy. RemoteTouch:\n\n'
+            '- Does not collect personal data\n'
+            '- Does not share your information with third parties\n'
+            '- Only communicates directly with your desktop app\n'
+            '- Uses secure encrypted connections\n\n'
+            'For questions, please contact us through our inquiry form.',
+            style: TextStyle(color: Colors.white70),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(l10n.close, style: const TextStyle(color: Color(0xFFe94560))),
+          ),
+        ],
       ),
     );
   }

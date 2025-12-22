@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -27,34 +27,22 @@ interface ConnectionRequest {
   ip_address: string;
 }
 
-// 通知音を鳴らす関数（ピンポン音）
+// 通知音を鳴らす関数（優しいチャイム音）
 function playNotificationSound() {
   try {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
 
-    // 最初の音（ピン）
-    const osc1 = audioContext.createOscillator();
-    const gain1 = audioContext.createGain();
-    osc1.connect(gain1);
-    gain1.connect(audioContext.destination);
-    osc1.frequency.value = 880; // A5
-    osc1.type = 'sine';
-    gain1.gain.setValueAtTime(0.5, audioContext.currentTime);
-    gain1.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
-    osc1.start(audioContext.currentTime);
-    osc1.stop(audioContext.currentTime + 0.2);
-
-    // 2番目の音（ポン）
-    const osc2 = audioContext.createOscillator();
-    const gain2 = audioContext.createGain();
-    osc2.connect(gain2);
-    gain2.connect(audioContext.destination);
-    osc2.frequency.value = 1100; // C#6
-    osc2.type = 'sine';
-    gain2.gain.setValueAtTime(0.5, audioContext.currentTime + 0.2);
-    gain2.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.4);
-    osc2.start(audioContext.currentTime + 0.2);
-    osc2.stop(audioContext.currentTime + 0.4);
+    // 優しいチャイム音（1回だけ）
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+    osc.frequency.value = 523.25; // C5（ド）- 優しい音程
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.3);
 
     console.log('[Audio] Notification sound played');
   } catch (e) {
@@ -79,6 +67,8 @@ function App() {
 
   // 接続リクエスト（承認待ち）
   const [pendingRequest, setPendingRequest] = useState<ConnectionRequest | null>(null);
+  // 音を鳴らした最後のリクエストIDを記録（重複防止）
+  const lastSoundRequestId = useRef<string | null>(null);
 
   useEffect(() => {
     // アクセシビリティ権限をチェック（プロンプトは表示しない）
@@ -128,8 +118,11 @@ function App() {
       console.log("Event payload:", event.payload);
       console.log("Setting pendingRequest...");
       setPendingRequest(event.payload);
-      // 通知音を鳴らす
-      playNotificationSound();
+      // 通知音を1回だけ鳴らす（同じリクエストで複数回鳴らさない）
+      if (lastSoundRequestId.current !== event.payload.request_id) {
+        lastSoundRequestId.current = event.payload.request_id;
+        playNotificationSound();
+      }
     });
     console.log("Connection request listener registered");
 
@@ -144,10 +137,12 @@ function App() {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        // 接続情報がまだない場合は取得を試みる
-        if (!connectionInfo) {
-          const info = await invoke<ConnectionInfo | null>("get_connection_info");
-          if (info) {
+        // 接続情報を常に最新に保つ（バックエンド再起動時にトークンが変わるため）
+        const info = await invoke<ConnectionInfo | null>("get_connection_info");
+        if (info) {
+          // トークンが変わった場合のみ更新
+          if (!connectionInfo || connectionInfo.auth_token !== info.auth_token) {
+            console.log("[App] Connection info updated, new token:", info.auth_token);
             setConnectionInfo(info);
           }
         }
@@ -175,13 +170,12 @@ function App() {
           }
         }
 
-        // 保留中の接続リクエストをポーリングで取得
+        // 保留中の接続リクエストをポーリングで取得（バックアップ用）
         const request = await invoke<ConnectionRequest | null>("get_pending_request");
         if (request && !pendingRequest) {
-          console.log("Pending request found:", request);
+          console.log("Pending request found via polling:", request);
           setPendingRequest(request);
-          // 通知音を鳴らす
-          playNotificationSound();
+          // 音はイベントリスナーで鳴らすのでここでは鳴らさない
         }
       } catch (e) {
         console.error(e);

@@ -1,10 +1,37 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/websocket_service.dart';
 import '../services/localization_service.dart';
+
+/// ANSIエスケープシーケンスを除去する正規表現
+final _ansiRegex = RegExp(
+  r'\x1B\[[0-9;?]*[a-zA-Z]'  // CSI sequences: ESC [ ... letter (including ? for private modes like ?2004h)
+  r'|\x1B\][^\x07]*\x07'     // OSC sequences: ESC ] ... BEL
+  r'|\x1B\][^\x1B]*\x1B\\'   // OSC sequences: ESC ] ... ESC \
+  r'|\x1B[PX^_][^\x1B]*\x1B\\' // DCS, SOS, PM, APC
+  r'|\x1B.'                   // Other ESC sequences
+  r'|\x07'                    // BEL
+  r'|\r'                      // Carriage return (改行のみ残す)
+);
+
+/// 罫線・セパレーター行を検出する正規表現（アンダースコア、ハイフン、等号の繰り返し）
+final _separatorLineRegex = RegExp(r'^[_\-=─━┄┅┈┉─]{10,}$', multiLine: true);
+
+/// ターミナル出力をクリーンアップする関数
+String cleanTerminalOutput(String input) {
+  // ANSIエスケープシーケンスを除去
+  var cleaned = input.replaceAll(_ansiRegex, '');
+  // 罫線のみの行を除去
+  cleaned = cleaned.replaceAll(_separatorLineRegex, '');
+  // 連続する空行を1つに
+  cleaned = cleaned.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  return cleaned.trim();
+}
 
 class ScreenShareScreen extends ConsumerStatefulWidget {
   const ScreenShareScreen({super.key});
@@ -35,10 +62,24 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   Offset _imageScrollOffset = Offset.zero; // 画像のスクロールオフセット
   String _lastSentText = ''; // 最後に送信したテキスト
   bool _useWebRTC = true; // WebRTCモード（常にWebRTC使用）
+  final double _viewZoomScale = 2.0; // 通常モードのズーム倍率（2倍固定）
+
+  // ターミナル閲覧モード（既存ターミナルに接続）
+  bool _ptyMode = false; // ターミナル閲覧モードフラグ
+  final StringBuffer _ptyOutputBuffer = StringBuffer();
+  StreamSubscription<String>? _ptySubscription;
+  final ScrollController _ptyScrollController = ScrollController();
+  String? _ptyAppName; // ターミナル閲覧モードで選択されたアプリ名
+  Timer? _terminalRefreshTimer; // ターミナル内容の定期更新タイマー
+
+  // カスタムショートカット
+  List<Map<String, String>> _customShortcuts = [];
 
   @override
   void initState() {
     super.initState();
+    // カスタムショートカットを読み込み
+    _loadCustomShortcuts();
     // 画面共有開始 & アプリ一覧取得
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startScreenShare();
@@ -50,6 +91,116 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     ]);
     // フルスクリーン
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  // カスタムショートカットを読み込み
+  Future<void> _loadCustomShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString('custom_shortcuts');
+    if (json != null) {
+      final list = jsonDecode(json) as List;
+      setState(() {
+        _customShortcuts = list.map((e) => Map<String, String>.from(e)).toList();
+      });
+    }
+  }
+
+  // カスタムショートカットを保存
+  Future<void> _saveCustomShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('custom_shortcuts', jsonEncode(_customShortcuts));
+  }
+
+  // ショートカット追加ダイアログ
+  void _showAddShortcutDialog() {
+    final labelController = TextEditingController();
+    final commandController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF16213e),
+        title: const Text('ショートカット追加', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: labelController,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: 'ボタン名',
+                labelStyle: TextStyle(color: Colors.white70),
+                hintText: '例: yes, /help',
+                hintStyle: TextStyle(color: Colors.white38),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: commandController,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: 'コマンド（送信する文字列）',
+                labelStyle: TextStyle(color: Colors.white70),
+                hintText: '例: yes, /compact',
+                hintStyle: TextStyle(color: Colors.white38),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () {
+              if (labelController.text.isNotEmpty && commandController.text.isNotEmpty) {
+                setState(() {
+                  _customShortcuts.add({
+                    'label': labelController.text,
+                    'command': commandController.text,
+                  });
+                });
+                _saveCustomShortcuts();
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('追加'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ショートカット削除確認
+  void _showDeleteShortcutDialog(int index) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF16213e),
+        title: const Text('ショートカット削除', style: TextStyle(color: Colors.white)),
+        content: Text(
+          '「${_customShortcuts[index]['label']}」を削除しますか？',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () {
+              setState(() {
+                _customShortcuts.removeAt(index);
+              });
+              _saveCustomShortcuts();
+              Navigator.pop(context);
+            },
+            child: const Text('削除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
   }
 
   void _startScreenShare() {
@@ -75,6 +226,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   void dispose() {
     _debounceTimer?.cancel();
     _scrollDebounceTimer?.cancel();
+    _terminalRefreshTimer?.cancel();
+    _ptySubscription?.cancel();
+    _ptyScrollController.dispose();
     _stopScreenShare();
     // 向きを元に戻す
     SystemChrome.setPreferredOrientations([
@@ -88,6 +242,98 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     _textController.dispose();
     _textFocusNode.dispose();
     super.dispose();
+  }
+
+  // ターミナル閲覧モードを開始（既存のターミナルウィンドウに接続）
+  void _startPtyMode(String appName) async {
+    // 先にUIを更新（ローディング表示のため）
+    setState(() {
+      _ptyMode = true;
+      _ptyAppName = appName;
+      _showKeyboardInput = true; // キーボードUIを自動表示
+      _ptyOutputBuffer.clear(); // バッファをクリア
+      _ptyOutputBuffer.write('📍 $appName の内容を取得中...\n');
+      _ptyOutputBuffer.write('// 現在PCで表示中のウィンドウからキャプチャします\n\n');
+    });
+
+    // 既存のターミナルコンテンツを取得（focusAppを呼ばず、現在表示中のウィンドウから取得）
+    // これにより、ユーザーがPCで見ているウィンドウのコンテンツが取得される
+    await _refreshTerminalContent();
+
+    // 定期的にターミナル内容を更新（3秒ごと）
+    _terminalRefreshTimer?.cancel();
+    _terminalRefreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _refreshTerminalContent();
+    });
+
+    // フォーカスを取得
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _textFocusNode.requestFocus();
+    });
+  }
+
+  // ターミナル内容を更新
+  Future<void> _refreshTerminalContent() async {
+    if (!_ptyMode || _ptyAppName == null) return;
+
+    final notifier = ref.read(webSocketProvider.notifier);
+    try {
+      final existingContent = await notifier.getTerminalContent(_ptyAppName!);
+      if (existingContent.isNotEmpty) {
+        // ANSIエスケープシーケンスと罫線を除去
+        final cleanContent = cleanTerminalOutput(existingContent);
+        if (mounted && _ptyMode) {
+          setState(() {
+            _ptyOutputBuffer.clear();
+            _ptyOutputBuffer.write(cleanContent);
+          });
+          _scrollPtyToBottom();
+        }
+      } else {
+        if (mounted && _ptyMode && _ptyOutputBuffer.isEmpty) {
+          setState(() {
+            _ptyOutputBuffer.clear();
+            _ptyOutputBuffer.write('// ターミナルの内容を取得できませんでした\n// PCのターミナルウィンドウを確認してください\n\n');
+          });
+        }
+      }
+    } catch (e) {
+      print('[Terminal] Failed to get terminal content: $e');
+    }
+  }
+
+  // ターミナル閲覧モードを終了
+  void _exitPtyMode() {
+    _terminalRefreshTimer?.cancel();
+    _terminalRefreshTimer = null;
+    _ptySubscription?.cancel();
+    _ptySubscription = null;
+    setState(() {
+      _ptyMode = false;
+      _ptyAppName = null;
+      _ptyOutputBuffer.clear();
+    });
+  }
+
+  // 新規ターミナルウィンドウを開く
+  void _openNewTerminal() async {
+    final notifier = ref.read(webSocketProvider.notifier);
+    // macOSで新しいTerminalウィンドウを開く
+    await notifier.executeShellCommand('open -na Terminal');
+    HapticFeedback.lightImpact();
+  }
+
+  // PTY出力を一番下にスクロール
+  void _scrollPtyToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_ptyScrollController.hasClients) {
+        _ptyScrollController.animateTo(
+          _ptyScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 100),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   void _onTapDown(TapDownDetails details, Size screenSize, ScreenInfo? screenInfo) {
@@ -372,10 +618,14 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         remoteY.clamp(0, screenInfo.height.toDouble()),
       );
     } else {
-      // 通常モード: PC画面全体を1/2サイズで表示
-      // 画像座標をPC座標に変換（2倍にスケールアップ）
-      final remoteX = imageX * 2.0;
-      final remoteY = imageY * 2.0;
+      // 通常モード: PC画面全体を1/2サイズで送信、_viewZoomScale倍で表示
+      // 表示座標 → 送信画像座標 → PC座標
+      // imageX は表示座標（ズーム後）なので、まずズームを解除
+      final sentImageX = imageX / _viewZoomScale;
+      final sentImageY = imageY / _viewZoomScale;
+      // 送信画像は1/2サイズなので、2倍してPC座標に
+      final remoteX = sentImageX * 2.0;
+      final remoteY = sentImageY * 2.0;
 
       return Offset(
         remoteX.clamp(0, screenInfo.width.toDouble()),
@@ -453,34 +703,23 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         remoteY.clamp(0, screenInfo.height.toDouble()),
       );
     } else {
-      // 通常モード: 画像は1/2サイズで受信
+      // 通常モード: 画像は1/2サイズで受信、ズーム倍率で拡大表示
       // 画像のピクセルサイズ（受信したJPEGのサイズ）
       final imagePixelWidth = screenInfo.width / 2.0;
       final imagePixelHeight = screenInfo.height / 2.0;
 
-      // 画像の表示サイズを計算（BoxFit.contain）
-      final aspectRatio = imagePixelWidth / imagePixelHeight;
-      final screenAspectRatio = screenSize.width / screenSize.height;
+      // 表示サイズ（ズーム倍率適用）
+      final displayWidth = imagePixelWidth * _viewZoomScale;
+      final displayHeight = imagePixelHeight * _viewZoomScale;
 
-      double displayWidth, displayHeight, offsetX, offsetY;
+      // タッチ位置にスクロールオフセットを適用して画像内座標を計算
+      // _imageScrollOffset は負の値（左上方向へのスクロール）
+      final imageX = localPos.dx - _imageScrollOffset.dx;
+      final imageY = localPos.dy - _imageScrollOffset.dy;
 
-      if (aspectRatio > screenAspectRatio) {
-        // 画像は幅いっぱいに表示、上下に余白
-        displayWidth = screenSize.width;
-        displayHeight = screenSize.width / aspectRatio;
-        offsetX = 0;
-        offsetY = (screenSize.height - displayHeight) / 2;
-      } else {
-        // 画像は高さいっぱいに表示、左右に余白
-        displayHeight = screenSize.height;
-        displayWidth = screenSize.height * aspectRatio;
-        offsetX = (screenSize.width - displayWidth) / 2;
-        offsetY = 0;
-      }
-
-      // タッチ位置から画像内の相対位置を計算（0.0〜1.0）
-      final relativeX = (localPos.dx - offsetX) / displayWidth;
-      final relativeY = (localPos.dy - offsetY) / displayHeight;
+      // 画像内の相対位置を計算（0.0〜1.0）
+      final relativeX = imageX / displayWidth;
+      final relativeY = imageY / displayHeight;
 
       // 相対位置からリモートPC画面座標に変換
       // 画像は1/2サイズだが、screenInfoは元のサイズなので直接使える
@@ -546,25 +785,52 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(webSocketProvider);
 
-    // 接続が切れたら戻る
-    if (state.connectionState == WsConnectionState.disconnected ||
-        state.connectionState == WsConnectionState.error) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) context.go('/');
-      });
-    }
+    // 接続が切れたらスナックバーで通知（自動遷移はしない）
+    // ユーザーが戻るボタンを押して自分で戻る
 
     // ヘッダー用の上部スペース（SafeArea + ヘッダー高さ）
     final topPadding = MediaQuery.of(context).padding.top + 80;
     // 画面表示エリアの固定高さ
     const double screenDisplayHeight = 380;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
+    return PopScope(
+      canPop: !_ptyMode, // PTYモード中はポップしない
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _ptyMode) {
+          // PTYモード中に戻るボタンを押した場合はPTYモードを終了
+          _exitPtyMode();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
         children: [
-          // 画面表示（固定高さ）
-          if (state.currentFrame != null)
+          // PTYモード: ターミナル出力を表示
+          if (_ptyMode)
+            Positioned(
+              top: topPadding,
+              left: 0,
+              right: 0,
+              height: screenDisplayHeight,
+              child: Container(
+                color: const Color(0xFF1E1E1E),
+                child: SingleChildScrollView(
+                  controller: _ptyScrollController,
+                  padding: const EdgeInsets.all(12),
+                  child: SelectableText(
+                    _ptyOutputBuffer.toString(),
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 13,
+                      color: Colors.white,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ),
+            )
+          // 通常モード: 画面表示（固定高さ）
+          else if (state.currentFrame != null)
             Positioned(
               top: topPadding,
               left: 0,
@@ -595,9 +861,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       imageHeight = screenDisplayHeight;
                     }
                   } else {
-                    // 通常モード: PC画面の1/2サイズ
-                    imageWidth = (state.screenInfo?.width ?? 1920) / 2.0;
-                    imageHeight = (state.screenInfo?.height ?? 1080) / 2.0;
+                    // 通常モード: PC画面の1/2サイズにズーム倍率を適用
+                    imageWidth = (state.screenInfo?.width ?? 1920) / 2.0 * _viewZoomScale;
+                    imageHeight = (state.screenInfo?.height ?? 1080) / 2.0 * _viewZoomScale;
                   }
 
                   // スクロール可能な最大量（画像が画面より大きい場合のみスクロール可能）
@@ -710,7 +976,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 },
               ),
           )
-          else
+          else if (!_ptyMode)
             const Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -725,8 +991,8 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
               ),
             ),
 
-          // PCマウスカーソル表示（画像の上にオーバーレイ）
-          if (state.currentFrame != null && _mouseMode && state.pcMousePosition != null)
+          // PCマウスカーソル表示（PTYモード時は非表示）
+          if (!_ptyMode && state.currentFrame != null && _mouseMode && state.pcMousePosition != null)
             Positioned(
               top: MediaQuery.of(context).padding.top + 80,
               left: 0,
@@ -753,9 +1019,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                         cursorY = (pcMouse.y - window.y) + _imageScrollOffset.dy;
                       }
                     } else {
-                      // 通常モード: PC座標/2（1/2サイズ画像）+ スクロールオフセット
-                      cursorX = (pcMouse.x / 2.0) + _imageScrollOffset.dx;
-                      cursorY = (pcMouse.y / 2.0) + _imageScrollOffset.dy;
+                      // 通常モード: PC座標/2 × ズーム倍率 + スクロールオフセット
+                      cursorX = (pcMouse.x / 2.0) * _viewZoomScale + _imageScrollOffset.dx;
+                      cursorY = (pcMouse.y / 2.0) * _viewZoomScale + _imageScrollOffset.dy;
                     }
 
                     // カーソルが表示範囲外なら表示しない
@@ -864,24 +1130,32 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                   decoration: BoxDecoration(
-                                    color: _mouseMode
-                                        ? const Color(0xFFe94560).withValues(alpha: 0.3)
-                                        : Colors.white.withValues(alpha: 0.2),
+                                    color: _ptyMode
+                                        ? Colors.green.withValues(alpha: 0.3)
+                                        : (_mouseMode
+                                            ? const Color(0xFFe94560).withValues(alpha: 0.3)
+                                            : Colors.white.withValues(alpha: 0.2)),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Icon(
-                                        _mouseMode ? Icons.mouse : Icons.visibility,
-                                        color: _mouseMode ? const Color(0xFFe94560) : Colors.white70,
+                                        _ptyMode
+                                            ? Icons.terminal
+                                            : (_mouseMode ? Icons.mouse : Icons.visibility),
+                                        color: _ptyMode
+                                            ? Colors.green
+                                            : (_mouseMode ? const Color(0xFFe94560) : Colors.white70),
                                         size: 12,
                                       ),
                                       const SizedBox(width: 4),
                                       Text(
-                                        _mouseMode ? l10n.mouse : l10n.view,
+                                        _ptyMode ? 'PTY' : (_mouseMode ? l10n.mouse : l10n.view),
                                         style: TextStyle(
-                                          color: _mouseMode ? const Color(0xFFe94560) : Colors.white70,
+                                          color: _ptyMode
+                                              ? Colors.green
+                                              : (_mouseMode ? const Color(0xFFe94560) : Colors.white70),
                                           fontSize: 10,
                                           fontWeight: FontWeight.bold,
                                         ),
@@ -893,8 +1167,8 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                             ),
                           ],
                         ),
-                        // 下段: 操作ガイド（マウスモード時のみ表示）
-                        if (_mouseMode)
+                        // 下段: 操作ガイド（マウスモード時のみ、PTYモードでは非表示）
+                        if (_mouseMode && !_ptyMode)
                           Container(
                             margin: const EdgeInsets.only(top: 4),
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -1007,6 +1281,44 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                                     });
                                   },
                                 ),
+                                // ターミナル閲覧モード関連ボタン
+                                if (_ptyMode) ...[
+                                  // Ctrl+C（既存ターミナルウィンドウに送信）
+                                  _toolbarButton(
+                                    icon: Icons.stop_circle_outlined,
+                                    label: 'Ctrl+C',
+                                    onTap: () {
+                                      // Ctrl+Cをキーストロークとして送信
+                                      ref.read(webSocketProvider.notifier).pressKey('ctrl+c');
+                                      HapticFeedback.lightImpact();
+                                      // 少し待ってから更新
+                                      Future.delayed(const Duration(milliseconds: 500), () {
+                                        _refreshTerminalContent();
+                                      });
+                                    },
+                                  ),
+                                  // 更新ボタン
+                                  _toolbarButton(
+                                    icon: Icons.refresh,
+                                    label: '更新',
+                                    onTap: () {
+                                      _refreshTerminalContent();
+                                      HapticFeedback.lightImpact();
+                                    },
+                                  ),
+                                  // PTYモード終了
+                                  _toolbarButton(
+                                    icon: Icons.exit_to_app,
+                                    label: l10n.quit,
+                                    onTap: _exitPtyMode,
+                                  ),
+                                ] else
+                                  // 新規ターミナルを開く
+                                  _toolbarButton(
+                                    icon: Icons.terminal,
+                                    label: l10n.newTerminal,
+                                    onTap: _openNewTerminal,
+                                  ),
                               ],
                             ),
                           );
@@ -1029,13 +1341,17 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             ),
         ],
       ),
+      ),
     );
   }
 
   Widget _buildInlineKeyboardInput() {
+    final l10n = ref.watch(l10nProvider);
     final state = ref.read(webSocketProvider);
-    final targetAppName = state.targetApp ??
-        state.runningApps.where((app) => app.isActive).firstOrNull?.name;
+    final targetAppName = _ptyMode
+        ? _ptyAppName ?? 'Terminal (PTY)'
+        : state.targetApp ??
+            state.runningApps.where((app) => app.isActive).firstOrNull?.name;
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 8),
@@ -1060,7 +1376,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  targetAppName ?? '不明なアプリ',
+                  targetAppName ?? l10n.unknownApp,
                   style: const TextStyle(
                     color: Color(0xFFe94560),
                     fontSize: 12,
@@ -1097,7 +1413,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       ),
                       const SizedBox(width: 4),
                       Text(
-                        _realtimeSync ? 'リアルタイム' : '手動送信',
+                        _realtimeSync ? l10n.realtimeMode : l10n.manualMode,
                         style: TextStyle(
                           color: _realtimeSync ? Colors.green : Colors.white54,
                           fontSize: 10,
@@ -1183,13 +1499,26 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                       ),
                     ),
                   ),
-                  onChanged: _realtimeSync ? _onTextChanged : null,
+                  onChanged: _ptyMode ? null : (_realtimeSync ? _onTextChanged : null),
                   onSubmitted: (text) {
-                    if (_autoEnter) {
-                      ref.read(webSocketProvider.notifier).pressKey('enter');
-                    }
-                    if (!_realtimeSync) {
-                      _sendText();
+                    if (_ptyMode) {
+                      // ターミナル閲覧モード: 既存ウィンドウにテキスト+Enterを送信
+                      if (text.isEmpty) {
+                        ref.read(webSocketProvider.notifier).pressKey('enter');
+                      } else {
+                        ref.read(webSocketProvider.notifier).typeTextAndEnter(text);
+                      }
+                      // 少し待ってから内容を更新
+                      Future.delayed(const Duration(milliseconds: 500), () {
+                        _refreshTerminalContent();
+                      });
+                    } else {
+                      if (_autoEnter) {
+                        ref.read(webSocketProvider.notifier).pressKey('enter');
+                      }
+                      if (!_realtimeSync) {
+                        _sendText();
+                      }
                     }
                     // フィールドをクリアして次の入力に備える
                     _textController.clear();
@@ -1199,10 +1528,23 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              // 送信ボタン（リアルタイムモードではEnter送信）
+              // 送信ボタン
               GestureDetector(
                 onTap: () {
-                  if (_realtimeSync) {
+                  if (_ptyMode) {
+                    // ターミナル閲覧モード: 既存ウィンドウにテキスト+Enterを送信
+                    final text = _textController.text;
+                    if (text.isEmpty) {
+                      ref.read(webSocketProvider.notifier).pressKey('enter');
+                    } else {
+                      ref.read(webSocketProvider.notifier).typeTextAndEnter(text);
+                    }
+                    _textController.clear();
+                    // 少し待ってから内容を更新
+                    Future.delayed(const Duration(milliseconds: 500), () {
+                      _refreshTerminalContent();
+                    });
+                  } else if (_realtimeSync) {
                     // リアルタイムモード: Enterを送信してクリア
                     ref.read(webSocketProvider.notifier).pressKey('enter');
                     _textController.clear();
@@ -1216,11 +1558,13 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 child: Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: _realtimeSync ? Colors.green : const Color(0xFFe94560),
+                    color: _ptyMode
+                        ? Colors.green
+                        : (_realtimeSync ? Colors.green : const Color(0xFFe94560)),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Icon(
-                    _realtimeSync ? Icons.keyboard_return : Icons.send,
+                    _ptyMode ? Icons.keyboard_return : (_realtimeSync ? Icons.keyboard_return : Icons.send),
                     color: Colors.white,
                     size: 20,
                   ),
@@ -1233,23 +1577,35 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
-              children: [
-                // 特殊キー
-                _compactKeyButton('Tab', 'tab'),
-                _compactKeyButton('⇧Tab', 'shift+tab'),
-                _compactKeyButton('Esc', 'escape'),
-                _compactKeyButton('⌫', 'backspace'),
-                // ショートカット
-                _compactKeyButton('⌘C', 'cmd+c'),
-                _compactKeyButton('⌘V', 'cmd+v'),
-                _compactKeyButton('⌘A', 'cmd+a'),
-                _compactKeyButton('⌘Z', 'cmd+z'),
-                _compactKeyButton('⌘S', 'cmd+s'),
-                // コマンド
-                _commandShortcut('git pull', 'git pull'),
-                _commandShortcut('git push', 'git push'),
-                _commandShortcut('git status', 'git status'),
-              ],
+              children: _ptyMode
+                  ? [
+                      // 基本キー
+                      _ptyKeyButton('Tab', 'tab'),
+                      _ptyKeyButton('⇧Tab', 'shift+tab'),
+                      _ptyKeyButton('⌫', 'backspace'),
+                      _ptyKeyButton('↑', 'up'),
+                      _ptyKeyButton('↓', 'down'),
+                      // カスタムショートカット
+                      ..._customShortcuts.asMap().entries.map((entry) =>
+                        _customShortcutButton(entry.key, entry.value['label']!, entry.value['command']!)),
+                      // 追加ボタン
+                      _addShortcutButton(),
+                    ]
+                  : [
+                      // 通常モード用ショートカット
+                      _compactKeyButton('Tab', 'tab'),
+                      _compactKeyButton('⇧Tab', 'shift+tab'),
+                      _compactKeyButton('Esc', 'escape'),
+                      _compactKeyButton('⌫', 'backspace'),
+                      _compactKeyButton('⌘C', 'cmd+c'),
+                      _compactKeyButton('⌘V', 'cmd+v'),
+                      _compactKeyButton('⌘A', 'cmd+a'),
+                      _compactKeyButton('⌘Z', 'cmd+z'),
+                      _compactKeyButton('⌘S', 'cmd+s'),
+                      _commandShortcut('git pull', 'git pull'),
+                      _commandShortcut('git push', 'git push'),
+                      _commandShortcut('git status', 'git status'),
+                    ],
             ),
           ),
         ],
@@ -1366,6 +1722,116 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     );
   }
 
+  // ターミナル閲覧モード用キーボタン（特殊キーを送信）
+  Widget _ptyKeyButton(String label, String keyCode) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: () {
+          // 特殊キーをキーストロークとして送信
+          ref.read(webSocketProvider.notifier).pressKey(keyCode);
+          HapticFeedback.lightImpact();
+          // 少し待ってから内容を更新
+          Future.delayed(const Duration(milliseconds: 300), () {
+            _refreshTerminalContent();
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1a1a2e),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.green.withValues(alpha: 0.5)),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.green, fontSize: 12),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ターミナル閲覧モード用コマンドショートカット
+  Widget _ptyCommandShortcut(String label, String command) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: () {
+          // 既存ウィンドウにコマンド+Enterを送信
+          ref.read(webSocketProvider.notifier).typeTextAndEnter(command);
+          // 少し待ってから内容を更新
+          Future.delayed(const Duration(milliseconds: 500), () {
+            _refreshTerminalContent();
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0f3460),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.green.withOpacity(0.5)),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.green, fontSize: 11),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // カスタムショートカットボタン（長押しで削除）
+  Widget _customShortcutButton(int index, String label, String command) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: () {
+          ref.read(webSocketProvider.notifier).typeTextAndEnter(command);
+          HapticFeedback.lightImpact();
+          Future.delayed(const Duration(milliseconds: 500), () {
+            _refreshTerminalContent();
+          });
+        },
+        onLongPress: () {
+          HapticFeedback.heavyImpact();
+          _showDeleteShortcutDialog(index);
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0f3460),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.cyan.withOpacity(0.5)),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.cyan, fontSize: 11),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ショートカット追加ボタン
+  Widget _addShortcutButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: _showAddShortcutDialog,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: const Icon(Icons.add, color: Colors.white54, size: 16),
+        ),
+      ),
+    );
+  }
+
   Widget _toolbarButton({
     required IconData icon,
     required String label,
@@ -1434,101 +1900,223 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _showAppsSheet(List<RunningApp> apps, Size screenSize, ScreenInfo? screenInfo) {
+    // CLIツールとGUIアプリを分離
+    final cliApps = apps.where((app) => app.isCli).toList();
+    final guiApps = apps.where((app) => !app.isCli).toList();
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF16213e),
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '起動中のアプリ',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.8,
+        expand: false,
+        builder: (context, scrollController) => Container(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '起動中のアプリ',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            if (apps.isEmpty)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(32),
-                  child: Text(
-                    'アプリを取得中...',
-                    style: TextStyle(color: Colors.white54),
+              const SizedBox(height: 16),
+              if (apps.isEmpty)
+                const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Text(
+                      'アプリを取得中...',
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  ),
+                )
+              else
+                Expanded(
+                  child: ListView(
+                    controller: scrollController,
+                    children: [
+                      // CLIツールセクション（存在する場合）
+                      if (cliApps.isNotEmpty) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Row(
+                            children: [
+                              Icon(Icons.terminal, color: Colors.green, size: 16),
+                              SizedBox(width: 8),
+                              Text(
+                                'CLI ツール（ターミナル内）',
+                                style: TextStyle(
+                                  color: Colors.green,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        ...cliApps.map((app) {
+                          final lowerName = app.name.toLowerCase();
+                          final isTerminalApp = lowerName.contains('terminal') ||
+                                                lowerName.contains('iterm') ||
+                                                lowerName.contains('warp') ||
+                                                lowerName.contains('kitty') ||
+                                                lowerName.contains('alacritty');
+                          return _buildAppListTile(
+                            app: app,
+                            screenSize: screenSize,
+                            screenInfo: screenInfo,
+                            isCli: true,
+                            isTerminal: isTerminalApp,
+                          );
+                        }),
+                        const SizedBox(height: 12),
+                      ],
+                      // GUIアプリセクション
+                      if (guiApps.isNotEmpty) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Row(
+                            children: [
+                              Icon(Icons.apps, color: Colors.blue, size: 16),
+                              SizedBox(width: 8),
+                              Text(
+                                'GUI アプリ（画面共有）',
+                                style: TextStyle(
+                                  color: Colors.blue,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        ...guiApps.map((app) {
+                          final lowerName = app.name.toLowerCase();
+                          final isBrowser = lowerName.contains('safari') ||
+                                            lowerName.contains('chrome');
+                          final isTerminal = lowerName.contains('terminal') ||
+                                             lowerName.contains('iterm');
+                          return _buildAppListTile(
+                            app: app,
+                            screenSize: screenSize,
+                            screenInfo: screenInfo,
+                            isCli: false,
+                            isBrowser: isBrowser,
+                            isTerminal: isTerminal,
+                          );
+                        }),
+                      ],
+                    ],
                   ),
                 ),
-              )
-            else
-              SizedBox(
-                height: 300,
-                child: ListView.builder(
-                  itemCount: apps.length,
-                  itemBuilder: (context, index) {
-                    final app = apps[index];
-                    final lowerName = app.name.toLowerCase();
-                    final isBrowser = lowerName.contains('safari') ||
-                                      lowerName.contains('chrome');
-                    final isTerminal = lowerName.contains('terminal') ||
-                                       lowerName.contains('iterm');
-                    final hasSubMenu = isBrowser || isTerminal;
-                    return ListTile(
-                      leading: Icon(
-                        app.isActive ? Icons.check_circle : Icons.circle_outlined,
-                        color: app.isActive ? Colors.green : Colors.white54,
-                      ),
-                      title: Text(
-                        app.name,
-                        style: TextStyle(
-                          color: app.isActive ? Colors.white : Colors.white70,
-                          fontWeight: app.isActive ? FontWeight.bold : FontWeight.normal,
-                        ),
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (hasSubMenu)
-                            Icon(
-                              isTerminal ? Icons.terminal : Icons.tab,
-                              color: Colors.white38,
-                              size: 20,
-                            ),
-                          const SizedBox(width: 8),
-                          // 終了ボタン
-                          IconButton(
-                            icon: const Icon(Icons.close, color: Colors.red, size: 20),
-                            onPressed: () {
-                              Navigator.pop(context);
-                              _showQuitAppDialog(app.name);
-                            },
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                          ),
-                        ],
-                      ),
-                      onTap: () {
-                        Navigator.pop(context);
-                        // Messagesアプリの場合は専用のチャット一覧を表示
-                        if (app.name.toLowerCase() == 'messages') {
-                          _showMessagesChatsSheet(screenSize, screenInfo);
-                        } else {
-                          // まずウィンドウ一覧を取得して表示
-                          _showAppWindowsSheet(app.name, screenSize, screenInfo, isBrowser, isTerminal);
-                        }
-                      },
-                    );
-                  },
-                ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _buildAppListTile({
+    required RunningApp app,
+    required Size screenSize,
+    required ScreenInfo? screenInfo,
+    required bool isCli,
+    bool isBrowser = false,
+    bool isTerminal = false,
+  }) {
+    final hasSubMenu = isBrowser || isTerminal;
+    return ListTile(
+      leading: Icon(
+        isCli
+            ? Icons.terminal
+            : (app.isActive ? Icons.check_circle : Icons.circle_outlined),
+        color: isCli
+            ? Colors.green
+            : (app.isActive ? Colors.green : Colors.white54),
+      ),
+      title: Text(
+        app.name,
+        style: TextStyle(
+          color: app.isActive ? Colors.white : Colors.white70,
+          fontWeight: app.isActive ? FontWeight.bold : FontWeight.normal,
+        ),
+      ),
+      subtitle: isCli
+          ? const Text(
+              'タップでターミナルモード開始',
+              style: TextStyle(color: Colors.green, fontSize: 10),
+            )
+          : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (hasSubMenu)
+            Icon(
+              isTerminal ? Icons.terminal : Icons.tab,
+              color: Colors.white38,
+              size: 20,
+            ),
+          const SizedBox(width: 8),
+          // CLIツールには終了ボタンを表示しない（ターミナルから終了するため）
+          if (!isCli)
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.red, size: 20),
+              onPressed: () {
+                Navigator.pop(context);
+                _showQuitAppDialog(app.name);
+              },
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+        ],
+      ),
+      onTap: () {
+        Navigator.pop(context);
+        if (isCli && !isTerminal) {
+          // CLIツール（ターミナル以外）の場合はターミナルモードを開始
+          // bundleIdからターミナルアプリ名を取得
+          String terminalApp = 'Terminal';
+          if (app.bundleId != null) {
+            if (app.bundleId!.contains('iterm')) {
+              terminalApp = 'iTerm';
+            } else if (app.bundleId!.contains('warp')) {
+              terminalApp = 'Warp';
+            }
+          }
+          _startPtyMode(terminalApp);
+        } else if (app.name.toLowerCase() == 'messages') {
+          // Messagesアプリの場合は専用のチャット一覧を表示
+          _showMessagesChatsSheet(screenSize, screenInfo);
+        } else if (isBrowser) {
+          // ブラウザの場合は直接タブ一覧を表示
+          _showBrowserTabsSheet(app.name, screenSize, screenInfo);
+        } else {
+          // GUIアプリ・ターミナルの場合はウィンドウ一覧を取得して表示
+          // ターミナルの場合はウィンドウ選択後にタブ一覧を表示
+          _showAppWindowsSheet(app.name, screenSize, screenInfo, isBrowser, isTerminal);
+        }
+      },
     );
   }
 
@@ -1642,10 +2230,16 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                               Future.delayed(const Duration(milliseconds: 300), () {
                                 _zoomToApp(appName, screenSize, screenInfo);
                               });
-                              // ブラウザの場合のみタブ一覧を表示（ターミナルは不要）
+                              // ブラウザの場合はタブ一覧を表示
                               if (isBrowser) {
                                 Future.delayed(const Duration(milliseconds: 800), () {
-                                  _showBrowserTabsSheet(appName);
+                                  _showBrowserTabsSheet(appName, screenSize, screenInfo);
+                                });
+                              }
+                              // ターミナルの場合はタブ一覧を表示
+                              if (isTerminal) {
+                                Future.delayed(const Duration(milliseconds: 800), () {
+                                  _showTerminalTabsSheet(appName);
                                 });
                               }
                             },
@@ -1788,6 +2382,18 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   // アプリにズーム（ウィンドウ情報を取得してからズーム）
   void _zoomToApp(String appName, Size screenSize, ScreenInfo? screenInfo) async {
     print('[ZoomToApp] Starting zoom for: $appName');
+
+    // ターミナルアプリのみPTYモードに切り替え（IDE/エディタは通常の画面共有）
+    final terminalApps = ['Terminal', 'iTerm', 'iTerm2', 'Hyper', 'Alacritty', 'kitty', 'Warp'];
+    // 完全一致または明確なターミナルアプリ名のみマッチ
+    if (terminalApps.any((t) => appName == t || appName.startsWith('$t '))) {
+      print('[ZoomToApp] Terminal app detected ($appName), switching to PTY mode');
+      if (mounted) {
+        _startPtyMode(appName);
+      }
+      return;
+    }
+
     // アプリをフォーカスしてウィンドウ情報を取得
     ref.read(webSocketProvider.notifier).focusAndGetWindow(appName);
 
@@ -1815,7 +2421,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     }
   }
 
-  void _showBrowserTabsSheet(String appName) {
+  void _showBrowserTabsSheet(String appName, Size screenSize, ScreenInfo? screenInfo) {
     ref.read(webSocketProvider.notifier).getBrowserTabs(appName);
     showModalBottomSheet(
       context: context,
@@ -1903,6 +2509,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                             onTap: () {
                               ref.read(webSocketProvider.notifier).activateTab(appName, tab.index);
                               Navigator.pop(context);
+                              // タブ切り替え後にズーム
+                              Future.delayed(const Duration(milliseconds: 300), () {
+                                _zoomToApp(appName, screenSize, screenInfo);
+                              });
                             },
                           );
                         },
@@ -2027,6 +2637,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                                 tab.tabIndex,
                               );
                               Navigator.pop(context);
+                              // タブをアクティブにした後、PTYモードを開始
+                              Future.delayed(const Duration(milliseconds: 300), () {
+                                _startPtyMode(appName);
+                              });
                             },
                           );
                         },
@@ -2181,6 +2795,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _showKeyboardDialog() {
+    final l10n = ref.read(l10nProvider);
     final controller = TextEditingController();
     final state = ref.read(webSocketProvider);
     // ターゲットアプリを取得（選択したアプリ or アクティブなアプリ）
@@ -2228,9 +2843,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                         // タイトルと送信先表示
                         Row(
                           children: [
-                            const Text(
-                              'テキスト入力',
-                              style: TextStyle(
+                            Text(
+                              l10n.textInput,
+                              style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
@@ -2260,16 +2875,16 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                               const Icon(Icons.send, color: Color(0xFFe94560), size: 16),
                               const SizedBox(width: 8),
                               Text(
-                                targetAppName ?? '不明なアプリ',
+                                targetAppName ?? l10n.unknownApp,
                                 style: const TextStyle(
                                   color: Color(0xFFe94560),
                                   fontSize: 14,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
-                              const Text(
-                                ' に送信',
-                                style: TextStyle(color: Colors.white70, fontSize: 14),
+                              Text(
+                                l10n.sendToApp,
+                                style: const TextStyle(color: Colors.white70, fontSize: 14),
                               ),
                             ],
                           ),

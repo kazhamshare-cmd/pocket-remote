@@ -12,6 +12,7 @@ pub struct RunningApp {
     pub name: String,
     pub bundle_id: Option<String>,
     pub is_active: bool,
+    pub is_cli: bool, // ターミナルで実行中のCLIツールかどうか
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +122,7 @@ impl SystemController {
                             name: name.to_string(),
                             bundle_id: None,
                             is_active: name == front_app,
+                            is_cli: false, // GUIアプリ
                         })
                         .collect();
                 }
@@ -130,6 +132,102 @@ impl SystemController {
             }
         }
         Vec::new()
+    }
+
+    /// ターミナルで実行中のCLIツールを取得（macOS版）
+    /// running_apps: 既に取得済みの起動中アプリリスト（ターミナルが起動しているかの確認用）
+    #[cfg(target_os = "macos")]
+    pub fn get_cli_tools_fast(running_apps: &[RunningApp]) -> Vec<RunningApp> {
+        let mut cli_tools = Vec::new();
+
+        // 起動中のターミナルアプリを確認
+        let has_terminal = running_apps.iter().any(|a| a.name == "Terminal");
+        let has_iterm = running_apps.iter().any(|a| a.name.contains("iTerm"));
+        let has_warp = running_apps.iter().any(|a| a.name == "Warp");
+
+        // どのターミナルも起動していなければ早期リターン
+        if !has_terminal && !has_iterm && !has_warp {
+            return cli_tools;
+        }
+
+        // 既知のCLIツール名（ターミナルタイトルの先頭単語と完全一致するもののみ）
+        // より限定的に: AI CLIツールのみ
+        let known_cli_tools = [
+            "gemini", "claude", "aider", "ollama", "sgpt",
+        ];
+
+        // タブタイトルがCLIツールかどうかを判定（先頭単語で判定）
+        let is_cli_tool_tab = |title: &str| -> Option<&str> {
+            let first_word = title.split_whitespace().next()?.to_lowercase();
+            known_cli_tools.iter().find(|&&tool| first_word == tool).copied()
+        };
+
+        // Terminal.appからCLIツールを検出（起動中の場合のみ）
+        if has_terminal {
+            for tab in Self::get_terminal_tabs() {
+                if let Some(tool) = is_cli_tool_tab(&tab.title) {
+                    let display_name = format!("{} (Terminal)", tool);
+                    if !cli_tools.iter().any(|t: &RunningApp| t.name == display_name) {
+                        cli_tools.push(RunningApp {
+                            name: display_name,
+                            bundle_id: Some("com.apple.Terminal".to_string()),
+                            is_active: false,
+                            is_cli: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        // iTerm2からCLIツールを検出（起動中の場合のみ）
+        if has_iterm {
+            for tab in Self::get_iterm_tabs() {
+                if let Some(tool) = is_cli_tool_tab(&tab.title) {
+                    let display_name = format!("{} (iTerm)", tool);
+                    if !cli_tools.iter().any(|t: &RunningApp| t.name == display_name) {
+                        cli_tools.push(RunningApp {
+                            name: display_name,
+                            bundle_id: Some("com.googlecode.iterm2".to_string()),
+                            is_active: false,
+                            is_cli: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        // WarpからCLIツールを検出（起動中の場合のみ）
+        if has_warp {
+            for tab in Self::get_warp_tabs() {
+                if let Some(tool) = is_cli_tool_tab(&tab.title) {
+                    let display_name = format!("{} (Warp)", tool);
+                    if !cli_tools.iter().any(|t: &RunningApp| t.name == display_name) {
+                        cli_tools.push(RunningApp {
+                            name: display_name,
+                            bundle_id: Some("dev.warp.Warp-Stable".to_string()),
+                            is_active: false,
+                            is_cli: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        cli_tools
+    }
+
+    /// ターミナルで実行中のCLIツールを取得（macOS版）- 互換用
+    #[cfg(target_os = "macos")]
+    pub fn get_cli_tools() -> Vec<RunningApp> {
+        // 起動中アプリを取得してから呼び出し
+        let apps = Self::get_running_apps();
+        Self::get_cli_tools_fast(&apps)
+    }
+
+    /// ターミナルで実行中のCLIツールを取得（Windows版）
+    #[cfg(target_os = "windows")]
+    pub fn get_cli_tools() -> Vec<RunningApp> {
+        Vec::new() // Windows版は未実装
     }
 
     /// 起動中のアプリケーション一覧を取得（Windows版）
@@ -161,6 +259,7 @@ impl SystemController {
                                 name: parts[0].to_string(),
                                 bundle_id: None,
                                 is_active: parts[1] == "true",
+                                is_cli: false, // GUIアプリ
                             })
                         } else {
                             None
@@ -353,10 +452,14 @@ impl SystemController {
     pub fn focus_app_window(app_name: &str, window_index: usize) -> bool {
         let escaped_name = app_name.replace("\"", "\\\"");
 
-        // 特定のウィンドウだけを最前面に（他のウィンドウは移動しない）
-        // System Eventsを使って直接ウィンドウを操作
+        // まずアプリ自体をアクティベートしてから、特定のウィンドウを最前面に
         let script = format!(
             r#"
+            -- まずアプリをアクティベート
+            tell application "{}" to activate
+            delay 0.1
+
+            -- 次に特定のウィンドウを最前面に
             tell application "System Events"
                 tell process "{}"
                     try
@@ -364,13 +467,11 @@ impl SystemController {
                         set targetWindow to window {}
                         -- ウィンドウを最前面に上げる
                         perform action "AXRaise" of targetWindow
-                        -- プロセスを最前面に
-                        set frontmost to true
                     end try
                 end tell
             end tell
             "#,
-            escaped_name, window_index
+            escaped_name, escaped_name, window_index
         );
 
         Command::new("osascript")
@@ -873,27 +974,26 @@ impl SystemController {
         false
     }
 
-    /// Chromeのタブをアクティブにする - macOS版
+    /// Chromeのタブをアクティブにする - macOS版（最適化版）
     #[cfg(target_os = "macos")]
     pub fn activate_chrome_tab(tab_index: usize) -> bool {
+        // 高速版：ウィンドウごとのタブ数を先に取得してから直接アクセス
         let script = format!(
             r#"
             tell application "Google Chrome"
                 activate
-                set globalTabCount to 0
-                set winNum to 1
-                repeat with w in windows
-                    set localTabIdx to 1
-                    repeat with t in tabs of w
-                        set globalTabCount to globalTabCount + 1
-                        if globalTabCount = {} then
-                            set active tab index of window winNum to localTabIdx
-                            set index of window winNum to 1
-                            return true
-                        end if
-                        set localTabIdx to localTabIdx + 1
-                    end repeat
-                    set winNum to winNum + 1
+                set targetIdx to {}
+                set currentCount to 0
+                repeat with winIdx from 1 to count of windows
+                    set w to window winIdx
+                    set tabCount to count of tabs of w
+                    if currentCount + tabCount >= targetIdx then
+                        set localIdx to targetIdx - currentCount
+                        set active tab index of w to localIdx
+                        set index of w to 1
+                        return true
+                    end if
+                    set currentCount to currentCount + tabCount
                 end repeat
                 return false
             end tell
@@ -1082,12 +1182,23 @@ impl SystemController {
             "down" => r#"tell application "System Events" to key code 125"#,
             "left" => r#"tell application "System Events" to key code 123"#,
             "right" => r#"tell application "System Events" to key code 124"#,
-            // コピー・ペースト
+            // Control キー組み合わせ（ターミナル用）
+            "ctrl+c" => r#"tell application "System Events" to keystroke "c" using control down"#,
+            "ctrl+d" => r#"tell application "System Events" to keystroke "d" using control down"#,
+            "ctrl+z" => r#"tell application "System Events" to keystroke "z" using control down"#,
+            "ctrl+a" => r#"tell application "System Events" to keystroke "a" using control down"#,
+            "ctrl+e" => r#"tell application "System Events" to keystroke "e" using control down"#,
+            "ctrl+l" => r#"tell application "System Events" to keystroke "l" using control down"#,
+            "ctrl+r" => r#"tell application "System Events" to keystroke "r" using control down"#,
+            "ctrl+u" => r#"tell application "System Events" to keystroke "u" using control down"#,
+            "ctrl+k" => r#"tell application "System Events" to keystroke "k" using control down"#,
+            // Command キー組み合わせ（コピー・ペースト）
             "cmd+c" => r#"tell application "System Events" to keystroke "c" using command down"#,
             "cmd+v" => r#"tell application "System Events" to keystroke "v" using command down"#,
             "cmd+x" => r#"tell application "System Events" to keystroke "x" using command down"#,
             "cmd+a" => r#"tell application "System Events" to keystroke "a" using command down"#,
             "cmd+z" => r#"tell application "System Events" to keystroke "z" using command down"#,
+            "cmd+s" => r#"tell application "System Events" to keystroke "s" using command down"#,
             _ => return false,
         };
 
@@ -1232,6 +1343,57 @@ impl SystemController {
         Vec::new()
     }
 
+    /// Warp Terminalのタブ一覧を取得 - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_warp_tabs() -> Vec<TerminalTab> {
+        // WarpはモダンなターミナルでAppleScriptサポートが限定的
+        // ウィンドウタイトルから情報を取得
+        let script = r#"
+            tell application "System Events"
+                try
+                    if (exists process "Warp") then
+                        tell process "Warp"
+                            set tabList to {}
+                            set winIndex to 1
+                            repeat with w in windows
+                                set winTitle to name of w
+                                set end of tabList to {winIndex, 1, winTitle, false}
+                                set winIndex to winIndex + 1
+                            end repeat
+                            return tabList
+                        end tell
+                    else
+                        return {}
+                    end if
+                on error
+                    return {}
+                end try
+            end tell
+        "#;
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                parse_terminal_tabs(&stdout)
+            }
+            Err(e) => {
+                eprintln!("Failed to get Warp tabs: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Warp Terminalタブ一覧 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_warp_tabs() -> Vec<TerminalTab> {
+        Vec::new()
+    }
+
     /// Terminal.appの特定のタブをアクティブにする - macOS版
     #[cfg(target_os = "macos")]
     pub fn activate_terminal_tab(window_index: usize, tab_index: usize) -> bool {
@@ -1290,6 +1452,346 @@ impl SystemController {
     #[cfg(target_os = "windows")]
     pub fn activate_iterm_tab(_window_index: usize, _tab_index: usize) -> bool {
         false
+    }
+
+    /// Terminal.appの現在のタブのコンテンツを取得（スクロールバック含む） - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_terminal_content() -> String {
+        // history属性でスクロールバックを含むすべての内容を取得
+        let script = r#"
+            tell application "Terminal"
+                try
+                    set frontWindow to front window
+                    set currentTab to selected tab of frontWindow
+                    -- historyでスクロールバック含む全内容を取得
+                    set termHistory to history of currentTab
+                    -- 長すぎる場合は末尾50000文字を返す
+                    if (length of termHistory) > 50000 then
+                        set termHistory to text ((length of termHistory) - 50000) thru -1 of termHistory
+                    end if
+                    return termHistory
+                on error errMsg
+                    return "Error: " & errMsg
+                end try
+            end tell
+        "#;
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let content = String::from_utf8_lossy(&o.stdout).to_string();
+                println!("[get_terminal_content] Terminal.app content length: {} chars", content.len());
+                content
+            }
+            Err(e) => {
+                eprintln!("[get_terminal_content] Failed to get Terminal content: {}", e);
+                String::new()
+            }
+        }
+    }
+
+    /// Terminal.appコンテンツ取得 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_terminal_content() -> String {
+        String::new()
+    }
+
+    /// iTerm2の現在のセッションのコンテンツを取得（スクロールバック含む） - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_iterm_content() -> String {
+        // iTerm2はcontentsでスクロールバック含むテキストを取得できる
+        let script = r#"
+            tell application "iTerm2"
+                try
+                    set currentWindow to current window
+                    set currentSession to current session of current tab of currentWindow
+                    -- contentsはスクロールバックを含む全テキストを返す
+                    set sessionContents to contents of currentSession
+                    return sessionContents
+                on error errMsg
+                    return ""
+                end try
+            end tell
+        "#;
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let content = String::from_utf8_lossy(&o.stdout).to_string();
+                println!("[get_iterm_content] iTerm2 content length: {} chars", content.len());
+                content
+            }
+            Err(e) => {
+                eprintln!("[get_iterm_content] Failed to get iTerm2 content: {}", e);
+                String::new()
+            }
+        }
+    }
+
+    /// iTerm2コンテンツ取得 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_iterm_content() -> String {
+        String::new()
+    }
+
+    /// 汎用ターミナルコンテンツ取得（アプリ名から自動判定）
+    pub fn get_terminal_content_for_app(app_name: &str) -> String {
+        let app_lower = app_name.to_lowercase();
+
+        // Terminal.app
+        if app_lower.contains("terminal") && !app_lower.contains("warp") {
+            println!("[get_terminal_content_for_app] Using Terminal.app method");
+            return Self::get_terminal_content();
+        }
+
+        // iTerm2
+        if app_lower.contains("iterm") {
+            println!("[get_terminal_content_for_app] Using iTerm2 method");
+            return Self::get_iterm_content();
+        }
+
+        // Warp Terminal
+        if app_lower.contains("warp") {
+            println!("[get_terminal_content_for_app] Using Warp method");
+            return Self::get_warp_content();
+        }
+
+        // Cursor / VSCode / Electron系（統合ターミナル）
+        if app_lower.contains("cursor") || app_lower.contains("code") ||
+           app_lower.contains("vscode") || app_lower.contains("electron") {
+            println!("[get_terminal_content_for_app] Using Cursor/VSCode method");
+            return Self::get_vscode_terminal_content(app_name);
+        }
+
+        // その他のアプリ（アクセシビリティAPIを試す）
+        println!("[get_terminal_content_for_app] Using generic accessibility method for: {}", app_name);
+        Self::get_app_text_content(app_name)
+    }
+
+    /// Warp Terminalのコンテンツを取得 - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_warp_content() -> String {
+        // Warpはモダンなターミナルでアクセシビリティ対応
+        let script = r#"
+            tell application "System Events"
+                tell process "Warp"
+                    try
+                        set allText to ""
+                        -- Warpのテキストコンテンツを取得
+                        set textElements to every text area of every scroll area of every window
+                        repeat with elem in textElements
+                            try
+                                set elemValue to value of item 1 of elem
+                                if elemValue is not missing value then
+                                    set allText to allText & elemValue & return
+                                end if
+                            end try
+                        end repeat
+                        -- 別のアプローチ: AXValue を直接取得
+                        if allText = "" then
+                            set allGroups to every group of window 1
+                            repeat with grp in allGroups
+                                try
+                                    set grpText to value of grp
+                                    if grpText is not missing value then
+                                        set allText to allText & grpText
+                                    end if
+                                end try
+                            end repeat
+                        end if
+                        return allText
+                    on error errMsg
+                        return ""
+                    end try
+                end tell
+            end tell
+        "#;
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let content = String::from_utf8_lossy(&o.stdout).to_string();
+                println!("[get_warp_content] Warp content length: {} chars", content.len());
+                content
+            }
+            Err(e) => {
+                eprintln!("[get_warp_content] Failed to get Warp content: {}", e);
+                String::new()
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_warp_content() -> String {
+        String::new()
+    }
+
+    /// VSCode/Cursor の統合ターミナルコンテンツを取得 - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_vscode_terminal_content(app_name: &str) -> String {
+        let process_name = if app_name.to_lowercase().contains("cursor") {
+            "Cursor"
+        } else {
+            "Code"
+        };
+
+        // VSCode/Cursorの統合ターミナルはxterm.jsベース
+        // アクセシビリティでテキストコンテンツを取得
+        let script = format!(r#"
+            tell application "System Events"
+                tell process "{}"
+                    try
+                        set allText to ""
+                        -- ウィンドウ内のすべてのテキストエリアを探索
+                        set allWindows to every window
+                        repeat with win in allWindows
+                            -- スクロールエリア内のテキストエリア
+                            try
+                                set scrollAreas to every scroll area of win
+                                repeat with sa in scrollAreas
+                                    try
+                                        set textAreas to every text area of sa
+                                        repeat with ta in textAreas
+                                            try
+                                                set taValue to value of ta
+                                                if taValue is not missing value and taValue is not "" then
+                                                    set allText to allText & taValue & return
+                                                end if
+                                            end try
+                                        end repeat
+                                    end try
+                                end repeat
+                            end try
+                            -- グループ内のテキストエリア
+                            try
+                                set allGroups to every group of win
+                                repeat with grp in allGroups
+                                    try
+                                        set innerGroups to every group of grp
+                                        repeat with innerGrp in innerGroups
+                                            try
+                                                set grpScrolls to every scroll area of innerGrp
+                                                repeat with gs in grpScrolls
+                                                    try
+                                                        set gsText to value of first text area of gs
+                                                        if gsText is not missing value then
+                                                            set allText to allText & gsText & return
+                                                        end if
+                                                    end try
+                                                end repeat
+                                            end try
+                                        end repeat
+                                    end try
+                                end repeat
+                            end try
+                        end repeat
+                        return allText
+                    on error errMsg
+                        return "Error: " & errMsg
+                    end try
+                end tell
+            end tell
+        "#, process_name);
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let content = String::from_utf8_lossy(&o.stdout).to_string();
+                println!("[get_vscode_terminal_content] {} content length: {} chars", process_name, content.len());
+                content
+            }
+            Err(e) => {
+                eprintln!("[get_vscode_terminal_content] Failed to get {} content: {}", process_name, e);
+                String::new()
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_vscode_terminal_content(_app_name: &str) -> String {
+        String::new()
+    }
+
+    /// アプリのテキストコンテンツを取得（アクセシビリティAPI使用） - macOS版
+    #[cfg(target_os = "macos")]
+    pub fn get_app_text_content(app_name: &str) -> String {
+        let escaped_name = app_name.replace("\"", "\\\"");
+
+        // System Eventsを使ってUIエレメントからテキストを取得
+        // ターミナル系アプリは通常AXTextFieldやAXTextAreaを持つ
+        let script = format!(r#"
+            tell application "System Events"
+                tell process "{}"
+                    try
+                        set allText to ""
+                        -- ウィンドウの全テキストエリアを探す
+                        set textElements to every text area of every scroll area of every window
+                        repeat with elem in textElements
+                            try
+                                set elemValue to value of item 1 of item 1 of elem
+                                if elemValue is not missing value then
+                                    set allText to allText & elemValue
+                                end if
+                            end try
+                        end repeat
+                        -- もしテキストエリアがなければ、グループ内を探す
+                        if allText = "" then
+                            set groupElements to every group of every window
+                            repeat with grp in groupElements
+                                try
+                                    set grpText to value of first text area of first scroll area of item 1 of grp
+                                    if grpText is not missing value then
+                                        set allText to allText & grpText
+                                    end if
+                                end try
+                            end repeat
+                        end if
+                        return allText
+                    on error errMsg
+                        return ""
+                    end try
+                end tell
+            end tell
+        "#, escaped_name);
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let content = String::from_utf8_lossy(&o.stdout).to_string();
+                println!("[get_app_text_content] {} content length: {} chars", app_name, content.len());
+                content
+            }
+            Err(e) => {
+                eprintln!("[get_app_text_content] Failed to get {} content: {}", app_name, e);
+                String::new()
+            }
+        }
+    }
+
+    /// アプリテキストコンテンツ取得 - Windows版（未実装）
+    #[cfg(target_os = "windows")]
+    pub fn get_app_text_content(_app_name: &str) -> String {
+        String::new()
     }
 
     /// 最前面のウィンドウ情報を取得 - macOS版
@@ -1416,12 +1918,14 @@ impl SystemController {
     }
 
     /// 指定アプリのウィンドウを最前面に持ってきてサイズを取得（最大化しない）
+    /// 注：focusAppWindowが先に呼ばれている場合は、そのウィンドウを維持する
     pub fn focus_and_get_window(app_name: &str) -> Option<AppWindowInfo> {
-        // まずアプリをフォーカス（アクティブ化）
-        println!("[SystemControl] focus_and_get_window: Focusing app '{}'", app_name);
-        Self::focus_app(app_name);
+        println!("[SystemControl] focus_and_get_window: Getting window info for '{}'", app_name);
 
-        // アプリがアクティブになるのを待つ
+        // focusAppWindowで既にフォーカス済みかを確認するが、
+        // 念のため常にfocus_appを呼んでアプリを最前面に
+        println!("[SystemControl] Calling focus_app for '{}'", app_name);
+        Self::focus_app(app_name);
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         // ウィンドウを左上に移動（座標計算を簡単にするため）
@@ -1722,6 +2226,7 @@ fn parse_running_apps(output: &str) -> Vec<RunningApp> {
                     Some(bundle_id.to_string())
                 },
                 is_active,
+                is_cli: false, // GUIアプリ
             });
         }
         i += 3;

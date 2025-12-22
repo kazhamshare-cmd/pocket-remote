@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "1000617246604",
+    "project_id": "remotetouch-77b40",
+    "storage_bucket": "remotetouch-77b40.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1000617246604:android:78f087b696669f8fea20a9",
+        "android_client_info": {
+          "package_name": "b19.ikushima.pocketremote"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB48ah_u-iUm4ZzRZKYu_RFoxvyzzJVC_E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1000617246604:android:fc9479bb3b478cf5ea20a9",
+        "android_client_info": {
+          "package_name": "com.remotetouch.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB48ah_u-iUm4ZzRZKYu_RFoxvyzzJVC_E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

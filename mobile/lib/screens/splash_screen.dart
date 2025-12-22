@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../services/force_update_service.dart';
 
-class SplashScreen extends StatefulWidget {
+class SplashScreen extends ConsumerStatefulWidget {
   final VoidCallback onComplete;
 
   const SplashScreen({super.key, required this.onComplete});
 
   @override
-  State<SplashScreen> createState() => _SplashScreenState();
+  ConsumerState<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen>
+class _SplashScreenState extends ConsumerState<SplashScreen>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _fadeAnimation;
@@ -20,23 +22,46 @@ class _SplashScreenState extends State<SplashScreen>
     super.initState();
     print('[SplashScreen] initState called');
     _controller = AnimationController(
-      duration: const Duration(milliseconds: 1500),
+      duration: const Duration(milliseconds: 500),
       vsync: this,
     );
 
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
     );
 
     _controller.forward();
 
-    Future.delayed(const Duration(milliseconds: 2500), () {
-      print('[SplashScreen] Timer completed, calling onComplete');
-      if (!_completed && mounted) {
-        _completed = true;
-        widget.onComplete();
-      }
-    });
+    // バージョンチェックを実行
+    _checkVersionAndProceed();
+  }
+
+  Future<void> _checkVersionAndProceed() async {
+    // バージョンチェック
+    await ref.read(forceUpdateProvider.notifier).checkForUpdate();
+
+    // 少し待ってからチェック（スプラッシュを見せる時間）
+    await Future.delayed(const Duration(milliseconds: 800));
+
+    if (!mounted) return;
+
+    final state = ref.read(forceUpdateProvider);
+
+    if (state.status == ForceUpdateStatus.updateRequired) {
+      // アップデートが必要な場合はダイアログを表示
+      await showForceUpdateDialog(context, state);
+      // ダイアログは閉じられないので、ここには到達しない
+    } else {
+      // アップデート不要なら続行
+      _proceedToApp();
+    }
+  }
+
+  void _proceedToApp() {
+    if (!_completed && mounted) {
+      _completed = true;
+      widget.onComplete();
+    }
   }
 
   @override
@@ -50,7 +75,7 @@ class _SplashScreenState extends State<SplashScreen>
   Widget build(BuildContext context) {
     print('[SplashScreen] build called');
     return Scaffold(
-      backgroundColor: const Color(0xFF1a1a2e),
+      backgroundColor: Colors.white, // 白背景（ネイティブスプラッシュと統一）
       body: Center(
         child: FadeTransition(
           opacity: _fadeAnimation,

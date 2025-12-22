@@ -42,14 +42,18 @@ class ConnectionInfo {
     if (parts.length < 3) {
       throw FormatException('Invalid QR code format');
     }
+    final port = int.tryParse(parts[1]);
+    if (port == null) {
+      throw FormatException('Invalid port number: ${parts[1]}');
+    }
     return ConnectionInfo(
       ip: parts[0],
-      port: int.parse(parts[1]),
+      port: port,
       token: parts.sublist(2).join(':'),
     );
   }
 
-  String get wsUrl => isExternal ? externalUrl! : 'ws://$ip:$port';
+  String get wsUrl => isExternal ? (externalUrl ?? 'wss://$ip') : 'ws://$ip:$port';
 
-  String get displayUrl => isExternal ? externalUrl! : '$ip:$port';
+  String get displayUrl => isExternal ? (externalUrl ?? ip) : '$ip:$port';
 }

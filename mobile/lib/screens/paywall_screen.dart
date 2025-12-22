@@ -1,5 +1,6 @@
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, exit;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -8,9 +9,6 @@ import '../services/localization_service.dart';
 
 class PaywallScreen extends ConsumerStatefulWidget {
   const PaywallScreen({super.key});
-
-  // DEBUG: Set to true to skip paywall for screenshots
-  static const bool kDebugSkipPaywall = false;
 
   @override
   ConsumerState<PaywallScreen> createState() => _PaywallScreenState();
@@ -31,17 +29,6 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
     final subscription = ref.watch(subscriptionProvider);
     final l10n = ref.watch(l10nProvider);
     final language = ref.watch(languageProvider);
-
-    // DEBUG: Skip paywall for screenshots
-    if (PaywallScreen.kDebugSkipPaywall) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        context.go('/scan');
-      });
-      return const Scaffold(
-        backgroundColor: Color(0xFF1a1a2e),
-        body: Center(child: CircularProgressIndicator(color: Color(0xFFe94560))),
-      );
-    }
 
     // If already subscribed, redirect to scan
     if (subscription.isSubscribed && !subscription.isLoading) {
@@ -477,8 +464,12 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
-              // アプリを終了（または制限モードへ）
-              // SystemNavigator.pop(); // アプリ終了
+              // アプリを終了
+              if (Platform.isIOS) {
+                exit(0);
+              } else {
+                SystemNavigator.pop();
+              }
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
             child: Text(l10n.close),
