@@ -216,6 +216,13 @@ impl SystemController {
         cli_tools
     }
 
+    /// ターミナルで実行中のCLIツールを取得（Windows版）- 高速版
+    /// Windows版は現在空のリストを返す
+    #[cfg(target_os = "windows")]
+    pub fn get_cli_tools_fast(_running_apps: &[RunningApp]) -> Vec<RunningApp> {
+        Vec::new() // Windows版は未実装
+    }
+
     /// ターミナルで実行中のCLIツールを取得（macOS版）- 互換用
     #[cfg(target_os = "macos")]
     pub fn get_cli_tools() -> Vec<RunningApp> {
