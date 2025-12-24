@@ -381,31 +381,11 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
     }
   }
 
-  void _showTerms(BuildContext context, L10n l10n) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF16213e),
-        title: Text(l10n.termsOfUse, style: const TextStyle(color: Colors.white)),
-        content: const SingleChildScrollView(
-          child: Text(
-            'RemoteTouch Monthly Subscription\n\n'
-            '- Payment will be charged to your Apple ID account at confirmation of purchase.\n'
-            '- Subscription automatically renews unless canceled at least 24 hours before the end of the current period.\n'
-            '- Your account will be charged for renewal within 24 hours prior to the end of the current period.\n'
-            '- You can manage and cancel your subscriptions by going to your account settings on the App Store after purchase.\n'
-            '- Any unused portion of a free trial period will be forfeited when you purchase a subscription.',
-            style: TextStyle(color: Colors.white70),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(l10n.close, style: const TextStyle(color: Color(0xFFe94560))),
-          ),
-        ],
-      ),
-    );
+  Future<void> _showTerms(BuildContext context, L10n l10n) async {
+    final url = Uri.parse('https://b19.co.jp/remotetouch/terms.html');
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    }
   }
 
   Future<void> _openSubscriptionManagement() async {
@@ -418,32 +398,11 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
     }
   }
 
-  void _showPrivacy(BuildContext context, L10n l10n) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF16213e),
-        title: Text(l10n.privacyPolicy, style: const TextStyle(color: Colors.white)),
-        content: const SingleChildScrollView(
-          child: Text(
-            'RemoteTouch Privacy Policy\n\n'
-            'We respect your privacy. RemoteTouch:\n\n'
-            '- Does not collect personal data\n'
-            '- Does not share your information with third parties\n'
-            '- Only communicates directly with your desktop app\n'
-            '- Uses secure encrypted connections\n\n'
-            'For questions, please contact us through our inquiry form.',
-            style: TextStyle(color: Colors.white70),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(l10n.close, style: const TextStyle(color: Color(0xFFe94560))),
-          ),
-        ],
-      ),
-    );
+  Future<void> _showPrivacy(BuildContext context, L10n l10n) async {
+    final url = Uri.parse('https://b19.co.jp/remotetouch/privacy.html');
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    }
   }
 
   void _showCloseConfirmDialog(BuildContext context, L10n l10n) {

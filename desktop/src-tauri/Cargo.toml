@@ -1,6 +1,6 @@
 [package]
 name = "pocket-remote"
-version = "0.1.0"
+version = "1.5.5"
 description = "Remote desktop control from mobile"
 authors = ["you"]
 edition = "2021"

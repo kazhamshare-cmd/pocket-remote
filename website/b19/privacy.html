@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - RemoteTouch</title>
+    <link rel="icon" type="image/png" href="icon.png">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #e94560;
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --text: #eee;
+            --text-muted: #aaa;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            line-height: 1.8;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        h1 {
+            color: var(--primary);
+            margin-bottom: 10px;
+            font-size: 2rem;
+        }
+
+        .last-updated {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 30px;
+        }
+
+        h2 {
+            color: var(--text);
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+            border-left: 4px solid var(--primary);
+            padding-left: 12px;
+        }
+
+        p, li {
+            color: var(--text-muted);
+            margin-bottom: 15px;
+        }
+
+        ul {
+            margin-left: 20px;
+            margin-bottom: 20px;
+        }
+
+        li {
+            margin-bottom: 8px;
+        }
+
+        a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-top: 40px;
+            padding: 12px 24px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .highlight-box {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            border-left: 4px solid #4ade80;
+        }
+
+        .highlight-box.warning {
+            border-left-color: var(--primary);
+        }
+
+        .highlight-box h3 {
+            color: #4ade80;
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+
+        .highlight-box.warning h3 {
+            color: var(--primary);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Privacy Policy</h1>
+        <p class="last-updated">Last Updated: December 23, 2024</p>
+
+        <p>This Privacy Policy describes how B19 Inc. ("we", "us", or "our") collects, uses, and protects your information when you use the RemoteTouch application ("App").</p>
+
+        <div class="highlight-box">
+            <h3>Our Privacy Commitment</h3>
+            <p style="margin-bottom: 0;">RemoteTouch is designed with privacy as a core principle. We do not collect, store, or transmit your personal data, screen content, or keyboard input to our servers.</p>
+        </div>
+
+        <h2>1. Information We Collect</h2>
+        <p>RemoteTouch collects minimal data necessary to provide our service:</p>
+
+        <h3>1.1 Connection Data (Temporary)</h3>
+        <ul>
+            <li><strong>Connection Tokens:</strong> Randomly generated tokens used to authenticate connections between your devices. These are temporary and not stored on our servers.</li>
+            <li><strong>IP Addresses:</strong> Used only for establishing peer-to-peer connections. Not logged or stored.</li>
+        </ul>
+
+        <h3>1.2 Subscription Data</h3>
+        <ul>
+            <li>If you subscribe, Apple (App Store) or Google (Play Store) handles all payment processing.</li>
+            <li>We only receive confirmation of your subscription status (active/inactive).</li>
+            <li>We do not have access to your payment information.</li>
+        </ul>
+
+        <h2>2. Information We Do NOT Collect</h2>
+        <div class="highlight-box warning">
+            <h3>We Never Collect:</h3>
+            <ul style="margin-bottom: 0;">
+                <li>Personal identification information (name, email, phone number)</li>
+                <li>Screen content, screenshots, or recordings</li>
+                <li>Keyboard input, passwords, or typed text</li>
+                <li>Files or documents on your devices</li>
+                <li>Location data or GPS coordinates</li>
+                <li>Usage analytics or behavioral tracking data</li>
+                <li>Device identifiers for advertising purposes</li>
+            </ul>
+        </div>
+
+        <h2>3. How Data is Transmitted</h2>
+        <p>RemoteTouch uses direct peer-to-peer connections:</p>
+        <ul>
+            <li><strong>Local Connection:</strong> Data travels directly between your mobile device and computer over your local network.</li>
+            <li><strong>Remote Connection:</strong> When using Cloudflare Tunnel for external access, data is encrypted end-to-end.</li>
+            <li><strong>No Server Storage:</strong> Screen sharing data and input commands are never stored on any server.</li>
+        </ul>
+
+        <h2>4. Data Security</h2>
+        <ul>
+            <li>All connections between your devices use encryption.</li>
+            <li>Connection tokens are randomly generated for each session.</li>
+            <li>WebRTC connections use DTLS encryption for data channels.</li>
+            <li>No persistent storage of sensitive data.</li>
+        </ul>
+
+        <h2>5. Third-Party Services</h2>
+        <p>We use the following third-party services:</p>
+
+        <h3>5.1 App Distribution</h3>
+        <ul>
+            <li><strong>Apple App Store:</strong> For iOS app distribution and subscription management. Subject to <a href="https://www.apple.com/legal/privacy/" target="_blank">Apple's Privacy Policy</a>.</li>
+            <li><strong>Google Play Store:</strong> For Android app distribution and subscription management. Subject to <a href="https://policies.google.com/privacy" target="_blank">Google's Privacy Policy</a>.</li>
+        </ul>
+
+        <h3>5.2 Connection Services</h3>
+        <ul>
+            <li><strong>Google STUN Servers:</strong> Used for WebRTC connection establishment. Only connection metadata is processed; no content is stored.</li>
+            <li><strong>Cloudflare Tunnel (Optional):</strong> For secure remote access. Subject to <a href="https://www.cloudflare.com/privacypolicy/" target="_blank">Cloudflare's Privacy Policy</a>.</li>
+        </ul>
+
+        <h2>6. Children's Privacy</h2>
+        <p>RemoteTouch is not intended for use by children under the age of 13. We do not knowingly collect personal information from children. If you believe a child has provided us with personal information, please contact us.</p>
+
+        <h2>7. Data Retention</h2>
+        <p>Since we do not collect personal data, there is no data to retain. Connection tokens are temporary and expire after each session.</p>
+
+        <h2>8. Your Rights</h2>
+        <p>You have the right to:</p>
+        <ul>
+            <li>Access any personal data we hold about you (we hold none)</li>
+            <li>Request deletion of your data</li>
+            <li>Opt out of any data collection (none exists)</li>
+            <li>Cancel your subscription at any time</li>
+        </ul>
+
+        <h2>9. Changes to This Policy</h2>
+        <p>We may update this Privacy Policy from time to time. We will notify you of any changes by:</p>
+        <ul>
+            <li>Posting the new Privacy Policy on this page</li>
+            <li>Updating the "Last Updated" date at the top</li>
+        </ul>
+        <p>Continued use of the App after changes constitutes acceptance of the updated Privacy Policy.</p>
+
+        <h2>10. Contact Us</h2>
+        <p>If you have any questions about this Privacy Policy, please contact us at:</p>
+        <p><strong>Email:</strong> <a href="mailto:support@b19.co.jp">support@b19.co.jp</a></p>
+        <p><strong>Company:</strong> B19 Inc.</p>
+
+        <a href="index.html" class="back-link">Back to RemoteTouch</a>
+    </div>
+</body>
+</html>
