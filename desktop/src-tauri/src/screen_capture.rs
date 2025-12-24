@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use rayon::prelude::*;
 use crate::CaptureRegion;
+use crate::h264_encoder::H264Encoder;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowInfo {
@@ -85,6 +86,20 @@ impl ScreenCapturer {
             let mut frame_count: u64 = 0;
             let mut logged_info = false;
 
+            // H.264エンコーダーを初期化（フルスケール - 最高画質）
+            let scaled_w = ((width) as u32 / 2) * 2; // 2の倍数に調整
+            let scaled_h = ((height) as u32 / 2) * 2;
+            let mut h264_encoder = match H264Encoder::new(scaled_w, scaled_h) {
+                Ok(enc) => {
+                    println!("[WS-H264] Encoder created: {}x{}", scaled_w, scaled_h);
+                    Some(enc)
+                }
+                Err(e) => {
+                    eprintln!("[WS-H264] Failed to create encoder: {}", e);
+                    None
+                }
+            };
+
             // 内側のキャプチャループ
             while ws_capture_running.load(std::sync::atomic::Ordering::SeqCst) {
                 match capturer.frame() {
@@ -133,72 +148,75 @@ impl ScreenCapturer {
                                 // キャプチャ領域をチェック
                                 let region = capture_region.read().clone();
 
-                                let (final_img, quality) = if let Some(r) = region {
-                                    // 領域指定あり: その領域だけをクロップして3倍に拡大、超高品質で送信
+                                // H.264エンコード用に1/2スケールにリサイズ
+                                // TCPなのでサイズ制限なし、高品質で送信可能
+                                let final_img = if let Some(r) = region {
+                                    // 領域指定あり: その領域をクロップ
                                     let crop_x = (r.x as u32).min(width as u32);
                                     let crop_y = (r.y as u32).min(height as u32);
                                     let crop_w = (r.width as u32).min(width as u32 - crop_x);
                                     let crop_h = (r.height as u32).min(height as u32 - crop_y);
 
                                     if crop_w > 0 && crop_h > 0 {
-                                        let cropped = dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h);
-                                        // 3倍に拡大して見やすくする
-                                        let enlarged = cropped.resize_exact(
-                                            crop_w * 3,
-                                            crop_h * 3,
-                                            image::imageops::FilterType::Triangle,
-                                        );
-                                        (enlarged, 85u8)
+                                        dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h)
                                     } else {
-                                        // 無効な領域の場合は全画面
-                                        let new_width = (width / 2) as u32;
-                                        let new_height = (height / 2) as u32;
-                                        let resized = dynamic_img.resize_exact(
-                                            new_width,
-                                            new_height,
-                                            image::imageops::FilterType::Triangle,
-                                        );
-                                        (resized, 70u8)
+                                        dynamic_img.clone()
                                     }
                                 } else {
-                                    // 領域指定なし: 全画面を2/3サイズで高画質送信（WSモードの利点）
-                                    let new_width = (width * 2 / 3) as u32;
-                                    let new_height = (height * 2 / 3) as u32;
-                                    let resized = dynamic_img.resize_exact(
-                                        new_width,
-                                        new_height,
-                                        image::imageops::FilterType::Triangle,
-                                    );
-                                    (resized, 80u8) // WSは高品質
+                                    dynamic_img.clone()
                                 };
 
-                                // JPEG品質を設定
-                                let mut jpeg_data = Vec::new();
-                                let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                                    &mut jpeg_data,
-                                    quality,
+                                // フルスケール、2の倍数に調整（最高画質）
+                                let new_width = (final_img.width() / 2) * 2;
+                                let new_height = (final_img.height() / 2) * 2;
+                                let new_width = new_width.max(2);
+                                let new_height = new_height.max(2);
+
+                                let resized = final_img.resize_exact(
+                                    new_width,
+                                    new_height,
+                                    image::imageops::FilterType::Triangle,
                                 );
 
-                                if final_img.write_with_encoder(encoder).is_ok() {
-                                    let receivers = tx.receiver_count();
-                                    if receivers > 0 {
-                                        let jpeg_size = jpeg_data.len();
-                                        match tx.send(jpeg_data) {
-                                            Ok(_) => {
-                                                frame_count += 1;
-                                                // フレーム送信成功（最初と100フレームごとに表示）
-                                                if frame_count == 1 || frame_count % 100 == 0 {
-                                                    println!("Frame {} sent, {} receivers, {} KB",
-                                                             frame_count, receivers, jpeg_size / 1024);
+                                // RGBAからBGRAに変換（H264エンコーダーはBGRA入力）
+                                let rgba_bytes = resized.to_rgba8().into_raw();
+                                let mut bgra_bytes = vec![0u8; rgba_bytes.len()];
+                                for (i, chunk) in rgba_bytes.chunks(4).enumerate() {
+                                    bgra_bytes[i * 4] = chunk[2];     // B
+                                    bgra_bytes[i * 4 + 1] = chunk[1]; // G
+                                    bgra_bytes[i * 4 + 2] = chunk[0]; // R
+                                    bgra_bytes[i * 4 + 3] = chunk[3]; // A
+                                }
+
+                                // H.264エンコード
+                                if let Some(ref mut encoder) = h264_encoder {
+                                    match encoder.encode_bgra(&bgra_bytes, new_width, new_height) {
+                                        Ok(h264_data) => {
+                                            if !h264_data.is_empty() {
+                                                let receivers = tx.receiver_count();
+                                                if receivers > 0 {
+                                                    let h264_size = h264_data.len();
+                                                    match tx.send(h264_data) {
+                                                        Ok(_) => {
+                                                            frame_count += 1;
+                                                            if frame_count == 1 || frame_count % 100 == 0 {
+                                                                println!("[WS-H264] Frame {} sent, {} receivers, {} KB, {}x{}",
+                                                                         frame_count, receivers, h264_size / 1024, new_width, new_height);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("[WS-H264] Failed to send frame: {}", e);
+                                                        }
+                                                    }
                                                 }
                                             }
-                                            Err(e) => {
-                                                eprintln!("Failed to send frame: {}", e);
+                                        }
+                                        Err(e) => {
+                                            if frame_count == 0 {
+                                                eprintln!("[WS-H264] Encode error: {}", e);
                                             }
                                         }
                                     }
-                                } else {
-                                    eprintln!("Failed to encode JPEG");
                                 }
                             }
                         }

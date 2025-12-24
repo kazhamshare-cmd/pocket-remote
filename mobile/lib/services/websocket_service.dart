@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/command.dart';
 import '../models/connection_info.dart';
 import 'webrtc_service.dart';
+import 'h264_decoder_service.dart';
 
 enum WsConnectionState { disconnected, connecting, connected, error }
 
@@ -294,6 +295,10 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   StreamSubscription? _subscription;
   ConnectionInfo? _connectionInfo;
   WebRTCService? _webrtcService;
+
+  // H.264デコーダー（WebSocket経由のH.264フレーム用）
+  H264DecoderService? _h264Decoder;
+  bool _h264DecoderInitialized = false;
 
   // シェルコマンド実行用のCompleter
   Completer<String>? _shellCommandCompleter;
@@ -808,10 +813,39 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     });
   }
 
+  /// H.264フレームをデコードして表示
+  Future<void> _decodeH264Frame(Uint8List h264Data) async {
+    // デコーダーが未初期化なら初期化
+    if (!_h264DecoderInitialized) {
+      _h264Decoder = H264DecoderService();
+      try {
+        await _h264Decoder!.initialize();
+        // デコードされたフレームを受信するコールバック
+        _h264Decoder!.onFrame = (jpegData, width, height) {
+          _safeSetState((s) => s.copyWith(currentFrame: jpegData));
+        };
+        _h264DecoderInitialized = true;
+        print('[WS-H264] Decoder initialized');
+      } catch (e) {
+        print('[WS-H264] Failed to initialize decoder: $e');
+        return;
+      }
+    }
+
+    // H.264フレームをデコード
+    try {
+      await _h264Decoder!.decode(h264Data);
+    } catch (e) {
+      print('[WS-H264] Decode error: $e');
+    }
+  }
+
   void _onMessage(dynamic message) {
     // バイナリデータ（画面フレーム）の処理
     if (message is List<int>) {
-      _safeSetState((s) => s.copyWith(currentFrame: Uint8List.fromList(message)));
+      final data = Uint8List.fromList(message);
+      // H.264フレームをデコード
+      _decodeH264Frame(data);
       return;
     }
 

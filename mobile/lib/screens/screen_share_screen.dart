@@ -61,8 +61,14 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   Offset _lastScrollPosition = Offset.zero; // 2本指スクロール位置
   Offset _imageScrollOffset = Offset.zero; // 画像のスクロールオフセット
   String _lastSentText = ''; // 最後に送信したテキスト
-  bool _useWebRTC = true; // WebRTCモード（常にWebRTC使用）
-  final double _viewZoomScale = 2.0; // 通常モードのズーム倍率（2倍固定）
+  bool _useWebRTC = false; // WebSocketモード（TCP経由でH.264、サイズ制限なし）
+
+  // ピンチズーム対応
+  double _viewZoomScale = 2.0; // 通常モードのズーム倍率（初期値2倍）
+  double _minZoom = 0.5; // 最小ズーム（全体表示）
+  double _maxZoom = 5.0; // 最大ズーム（5倍）
+  double _lastScale = 1.0; // ピンチ開始時のスケール
+  bool _isPinching = false; // ピンチ中フラグ
 
   // ターミナル閲覧モード（既存ターミナルに接続）
   bool _ptyMode = false; // ターミナル閲覧モードフラグ
@@ -346,15 +352,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     // リモート座標を計算
     final remotePos = _screenToRemoteCoordinates(details.localPosition, screenSize, screenInfo);
 
-    // デバッグログ
-    print('[Touch] localPosition: ${details.localPosition}');
-    print('[Touch] screenSize: $screenSize');
-    print('[Touch] remotePos: $remotePos');
-    print('[Touch] screenInfo: ${screenInfo.width}x${screenInfo.height}');
-    if (_focusedWindow != null) {
-      print('[Touch] focusedWindow: x=${_focusedWindow!.x}, y=${_focusedWindow!.y}, ${_focusedWindow!.width}x${_focusedWindow!.height}');
-    }
-
     // カーソル位置を更新（画面表示エリアのtopPaddingを加算）
     final topPadding = MediaQuery.of(context).padding.top + 80;
     setState(() {
@@ -592,15 +589,17 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         sentHeight = window.height.toDouble();
       }
 
-      // 表示サイズを計算（高さに合わせてスケール）
-      double displayScale = 1.0;
+      // 表示サイズを計算（高さに合わせてスケール + ピンチズーム）
+      double baseDisplayScale = 1.0;
       if (sentHeight < screenSize.height) {
-        displayScale = screenSize.height / sentHeight;
+        baseDisplayScale = screenSize.height / sentHeight;
       }
+      // ピンチズームも考慮した総合スケール
+      final totalDisplayScale = baseDisplayScale * _viewZoomScale;
 
       // 表示座標 → 送信画像座標 → リモート座標
-      final sentImageX = imageX / displayScale;
-      final sentImageY = imageY / displayScale;
+      final sentImageX = imageX / totalDisplayScale;
+      final sentImageY = imageY / totalDisplayScale;
 
       double remoteX, remoteY;
       if (pixelCount > 600000) {
@@ -618,14 +617,14 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         remoteY.clamp(0, screenInfo.height.toDouble()),
       );
     } else {
-      // 通常モード: PC画面全体を1/2サイズで送信、_viewZoomScale倍で表示
+      // 通常モード: PC画面全体をフルサイズで送信、_viewZoomScale倍で表示
       // 表示座標 → 送信画像座標 → PC座標
       // imageX は表示座標（ズーム後）なので、まずズームを解除
       final sentImageX = imageX / _viewZoomScale;
       final sentImageY = imageY / _viewZoomScale;
-      // 送信画像は1/2サイズなので、2倍してPC座標に
-      final remoteX = sentImageX * 2.0;
-      final remoteY = sentImageY * 2.0;
+      // 送信画像はフルサイズなので、そのままPC座標
+      final remoteX = sentImageX;
+      final remoteY = sentImageY;
 
       return Offset(
         remoteX.clamp(0, screenInfo.width.toDouble()),
@@ -655,10 +654,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
       return Offset(imageX, imageY);
     } else {
-      // 通常モード: PC画面全体を1/2サイズで表示
-      // PC座標を画像座標に変換（1/2スケール）
-      final imageX = pcMouse.x / 2.0;
-      final imageY = pcMouse.y / 2.0;
+      // 通常モード: PC画面全体をフルサイズで表示
+      // PC座標を画像座標に変換（フルスケール = そのまま）
+      final imageX = pcMouse.x.toDouble();
+      final imageY = pcMouse.y.toDouble();
 
       return Offset(imageX, imageY);
     }
@@ -843,27 +842,30 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   // 画像サイズを計算
                   // デスクトップは600,000ピクセル以上のウィンドウを1/2サイズで送信
                   double imageWidth, imageHeight;
+                  double baseDisplayScale = 1.0; // ズーム前の基本スケール
                   if (_focusedWindow != null) {
                     final pixelCount = _focusedWindow!.width * _focusedWindow!.height;
+                    double sentWidth, sentHeight;
                     if (pixelCount > 600000) {
                       // Large window: 1/2サイズで送信される
-                      imageWidth = _focusedWindow!.width / 2.0;
-                      imageHeight = _focusedWindow!.height / 2.0;
+                      sentWidth = _focusedWindow!.width / 2.0;
+                      sentHeight = _focusedWindow!.height / 2.0;
                     } else {
                       // Small/Medium window: 原寸で送信される
-                      imageWidth = _focusedWindow!.width.toDouble();
-                      imageHeight = _focusedWindow!.height.toDouble();
+                      sentWidth = _focusedWindow!.width.toDouble();
+                      sentHeight = _focusedWindow!.height.toDouble();
                     }
                     // 画像が表示エリアより小さい場合はスケールアップ
-                    if (imageHeight < screenDisplayHeight) {
-                      final scale = screenDisplayHeight / imageHeight;
-                      imageWidth = imageWidth * scale;
-                      imageHeight = screenDisplayHeight;
+                    if (sentHeight < screenDisplayHeight) {
+                      baseDisplayScale = screenDisplayHeight / sentHeight;
                     }
+                    // ピンチズーム倍率を適用
+                    imageWidth = sentWidth * baseDisplayScale * _viewZoomScale;
+                    imageHeight = sentHeight * baseDisplayScale * _viewZoomScale;
                   } else {
-                    // 通常モード: PC画面の1/2サイズにズーム倍率を適用
-                    imageWidth = (state.screenInfo?.width ?? 1920) / 2.0 * _viewZoomScale;
-                    imageHeight = (state.screenInfo?.height ?? 1080) / 2.0 * _viewZoomScale;
+                    // 通常モード: PC画面フルサイズにズーム倍率を適用
+                    imageWidth = (state.screenInfo?.width ?? 1920).toDouble() * _viewZoomScale;
+                    imageHeight = (state.screenInfo?.height ?? 1080).toDouble() * _viewZoomScale;
                   }
 
                   // スクロール可能な最大量（画像が画面より大きい場合のみスクロール可能）
@@ -885,13 +887,25 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                     onScaleStart: (details) {
                       _pointerCount = details.pointerCount;
                       _lastScrollPosition = details.focalPoint;
+                      _lastScale = _viewZoomScale; // ピンチ開始時のズーム保存
+                      _isPinching = details.pointerCount >= 2;
                       if (details.pointerCount == 1) {
                         _onPanStart(details, screenSize, state.screenInfo);
                       }
                     },
                     onScaleUpdate: (details) {
                       if (details.pointerCount >= 2) {
-                        // 2本指スクロール → PC側に直接送信（シンプル化）
+                        // ピンチズーム処理
+                        if (details.scale != 1.0) {
+                          final newZoom = (_lastScale * details.scale).clamp(_minZoom, _maxZoom);
+                          if ((newZoom - _viewZoomScale).abs() > 0.01) {
+                            setState(() {
+                              _viewZoomScale = newZoom;
+                            });
+                          }
+                        }
+
+                        // 2本指パン（スクロール）
                         final delta = details.focalPoint - _lastScrollPosition;
                         _lastScrollPosition = details.focalPoint;
 
@@ -900,7 +914,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                           final currentDx = _imageScrollOffset.dx;
                           final newDx = currentDx + delta.dx;
                           final clampedDx = newDx.clamp(-maxScrollX, 0.0);
-                          print('[HorizontalPan] delta.dx=${delta.dx.toStringAsFixed(1)}, currentDx=${currentDx.toStringAsFixed(1)}, newDx=${newDx.toStringAsFixed(1)}, maxScrollX=${maxScrollX.toStringAsFixed(1)}, clampedDx=${clampedDx.toStringAsFixed(1)}');
                           setState(() {
                             _imageScrollOffset = Offset(
                               clampedDx,
@@ -950,6 +963,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                         _onPanEnd(details, screenSize, state.screenInfo);
                       }
                       _pointerCount = 0;
+                      _isPinching = false;
                     },
                     child: Container(
                       width: screenSize.width,
@@ -991,8 +1005,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
               ),
             ),
 
-          // PCマウスカーソル表示（PTYモード時は非表示）
-          if (!_ptyMode && state.currentFrame != null && _mouseMode && state.pcMousePosition != null)
+          // PCマウスカーソル表示（PTYモード時・デスクトップモード時は非表示）
+          // デスクトップモードでは画面キャプチャ自体にカーソルが含まれるため不要
+          if (!_ptyMode && _focusedWindow != null && state.currentFrame != null && _mouseMode && state.pcMousePosition != null)
             Positioned(
               top: MediaQuery.of(context).padding.top + 80,
               left: 0,
@@ -1004,24 +1019,79 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                     final screenSize = Size(constraints.maxWidth, screenDisplayHeight);
                     final pcMouse = state.pcMousePosition!;
 
+                    // 画像サイズとスクロール制限を計算（画像表示と同じロジック）
+                    double imageWidth, imageHeight;
+                    if (_focusedWindow != null) {
+                      final pixelCount = _focusedWindow!.width * _focusedWindow!.height;
+                      double sentWidth, sentHeight;
+                      if (pixelCount > 600000) {
+                        sentWidth = _focusedWindow!.width / 2.0;
+                        sentHeight = _focusedWindow!.height / 2.0;
+                      } else {
+                        sentWidth = _focusedWindow!.width.toDouble();
+                        sentHeight = _focusedWindow!.height.toDouble();
+                      }
+                      double baseDisplayScale = 1.0;
+                      if (sentHeight < screenDisplayHeight) {
+                        baseDisplayScale = screenDisplayHeight / sentHeight;
+                      }
+                      imageWidth = sentWidth * baseDisplayScale * _viewZoomScale;
+                      imageHeight = sentHeight * baseDisplayScale * _viewZoomScale;
+                    } else {
+                      imageWidth = (state.screenInfo?.width ?? 1920).toDouble() * _viewZoomScale;
+                      imageHeight = (state.screenInfo?.height ?? 1080).toDouble() * _viewZoomScale;
+                    }
+
+                    final maxScrollX = (imageWidth - screenSize.width).clamp(0.0, double.infinity);
+                    final maxScrollY = (imageHeight - screenDisplayHeight).clamp(0.0, double.infinity);
+
+                    // 画像表示と同じclampedオフセットを使用
+                    final clampedScrollOffsetX = _imageScrollOffset.dx.clamp(-maxScrollX, 0.0);
+                    final clampedScrollOffsetY = _focusedWindow != null
+                        ? 0.0
+                        : _imageScrollOffset.dy.clamp(-maxScrollY, 0.0);
+
                     // PCマウス座標を画面座標に変換（スケールとスクロールオフセット考慮）
                     double cursorX, cursorY;
                     if (_focusedWindow != null) {
                       final window = _focusedWindow!;
                       final pixelCount = window.width * window.height;
+
+                      // 送信画像サイズを計算
+                      double sentWidth, sentHeight;
                       if (pixelCount > 600000) {
-                        // Large window: 1/2サイズで表示
-                        cursorX = (pcMouse.x - window.x) / 2.0 + _imageScrollOffset.dx;
-                        cursorY = (pcMouse.y - window.y) / 2.0 + _imageScrollOffset.dy;
+                        sentWidth = window.width / 2.0;
+                        sentHeight = window.height / 2.0;
                       } else {
-                        // Small/Medium window: 原寸
-                        cursorX = (pcMouse.x - window.x) + _imageScrollOffset.dx;
-                        cursorY = (pcMouse.y - window.y) + _imageScrollOffset.dy;
+                        sentWidth = window.width.toDouble();
+                        sentHeight = window.height.toDouble();
                       }
+
+                      // 基本表示スケール（画面に合わせる）
+                      double baseDisplayScale = 1.0;
+                      if (sentHeight < screenDisplayHeight) {
+                        baseDisplayScale = screenDisplayHeight / sentHeight;
+                      }
+
+                      // 総合スケール（基本スケール × ピンチズーム）
+                      final totalScale = baseDisplayScale * _viewZoomScale;
+
+                      // PC座標 → 送信画像座標 → 表示座標
+                      double sentImageX, sentImageY;
+                      if (pixelCount > 600000) {
+                        sentImageX = (pcMouse.x - window.x) / 2.0;
+                        sentImageY = (pcMouse.y - window.y) / 2.0;
+                      } else {
+                        sentImageX = (pcMouse.x - window.x).toDouble();
+                        sentImageY = (pcMouse.y - window.y).toDouble();
+                      }
+
+                      cursorX = sentImageX * totalScale + clampedScrollOffsetX;
+                      cursorY = sentImageY * totalScale + clampedScrollOffsetY;
                     } else {
-                      // 通常モード: PC座標/2 × ズーム倍率 + スクロールオフセット
-                      cursorX = (pcMouse.x / 2.0) * _viewZoomScale + _imageScrollOffset.dx;
-                      cursorY = (pcMouse.y / 2.0) * _viewZoomScale + _imageScrollOffset.dy;
+                      // 通常モード: PC座標 × ズーム倍率 + スクロールオフセット（フルスケール）
+                      cursorX = pcMouse.x * _viewZoomScale + clampedScrollOffsetX;
+                      cursorY = pcMouse.y * _viewZoomScale + clampedScrollOffsetY;
                     }
 
                     // カーソルが表示範囲外なら表示しない

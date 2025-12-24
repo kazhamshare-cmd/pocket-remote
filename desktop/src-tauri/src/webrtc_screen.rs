@@ -17,7 +17,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use scrap::{Capturer, Display};
 use std::time::{Duration, Instant};
-use std::io::ErrorKind::WouldBlock;
+use std::io::{ErrorKind::WouldBlock, Write};
 use image::{ImageBuffer, Rgba, DynamicImage};
 use bytes::Bytes;
 use crate::CaptureRegion;
@@ -38,7 +38,7 @@ static H264_ENCODER: Lazy<ParkingMutex<Option<H264Encoder>>> = Lazy::new(|| {
 
 /// 現在のエンコーディングモード
 static ENCODING_MODE: Lazy<ParkingRwLock<EncodingMode>> = Lazy::new(|| {
-    ParkingRwLock::new(EncodingMode::Jpeg) // JPEGにフォールバック（H.264フラグメント問題回避）
+    ParkingRwLock::new(EncodingMode::H264) // H.264のみ使用
 });
 
 /// Data Channel開通時にキーフレームを強制するフラグ
@@ -117,6 +117,7 @@ impl WebRTCScreenShare {
         let dc_holder_clone = Arc::clone(&data_channel_holder);
         data_channel.on_open(Box::new(move || {
             println!("[WebRTC] Data channel opened!");
+            let _ = std::io::stdout().flush();
             // キーフレームを強制送信（H.264デコーダー初期化のため）
             request_keyframe();
             Box::pin(async {})
@@ -677,6 +678,8 @@ pub fn encode_frame_auto(
                 })
         }
         EncodingMode::H264 => {
+            let should_log = frame_count < 5;
+
             // クロップしてBGRAデータを抽出
             let (crop_x, crop_y, crop_w, crop_h) = match &region {
                 Some(r) => {
@@ -699,17 +702,64 @@ pub fn encode_frame_auto(
             let alignment = 128;
             let actual_stride = ((row_bytes + alignment - 1) / alignment) * alignment;
 
-            // BGRAデータを抽出（クロップ領域のみ）
-            let mut bgra_data = Vec::with_capacity(crop_w * crop_h * 4);
-            for y in crop_y..(crop_y + crop_h) {
-                let row_start = y * actual_stride + crop_x * bytes_per_pixel;
-                let row_end = row_start + crop_w * bytes_per_pixel;
-                if row_end <= bgra.len() {
-                    bgra_data.extend_from_slice(&bgra[row_start..row_end]);
+            // BGRAからRGBAに変換しながらクロップ
+            let mut rgba_data = Vec::with_capacity(crop_w * crop_h * 4);
+            for y_pos in crop_y..(crop_y + crop_h) {
+                let row_start = y_pos * actual_stride + crop_x * bytes_per_pixel;
+                for x_pos in 0..crop_w {
+                    let idx = row_start + x_pos * 4;
+                    if idx + 3 < bgra.len() {
+                        rgba_data.push(bgra[idx + 2]); // R
+                        rgba_data.push(bgra[idx + 1]); // G
+                        rgba_data.push(bgra[idx]);     // B
+                        rgba_data.push(bgra[idx + 3]); // A
+                    }
                 }
             }
 
-            encode_frame_h264(&bgra_data, crop_w as u32, crop_h as u32, frame_count)
+            // 画像を作成してリサイズ（H.264でも解像度を下げてフレームサイズを小さく）
+            let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
+                crop_w as u32,
+                crop_h as u32,
+                rgba_data,
+            )?;
+
+            let dynamic_img = DynamicImage::ImageRgba8(img);
+
+            // 固定1/4スケール（キーフレーム15KB以下を保証）
+            let new_width = ((crop_w / 4) as u32).max(2);
+            let new_height = ((crop_h / 4) as u32).max(2);
+            // 2の倍数に調整（YUV420要件）
+            let new_width = (new_width / 2) * 2;
+            let new_height = (new_height / 2) * 2;
+
+            if should_log {
+                println!("[H264] Window {}x{} → 1/4 scale → {}x{}",
+                    crop_w, crop_h, new_width, new_height);
+            }
+
+            let final_img = dynamic_img.resize_exact(
+                new_width.max(2),
+                new_height.max(2),
+                image::imageops::FilterType::Triangle,
+            );
+
+            // RGBAからBGRAに戻す（H.264エンコーダー用）
+            let rgba_bytes = final_img.to_rgba8();
+            let mut bgra_resized = Vec::with_capacity((new_width * new_height * 4) as usize);
+            for pixel in rgba_bytes.pixels() {
+                bgra_resized.push(pixel[2]); // B
+                bgra_resized.push(pixel[1]); // G
+                bgra_resized.push(pixel[0]); // R
+                bgra_resized.push(pixel[3]); // A
+            }
+
+            if should_log {
+                println!("[H264] Sending frame: crop={}x{}, final={}x{}",
+                    crop_w, crop_h, new_width, new_height);
+            }
+
+            encode_frame_h264(&bgra_resized, new_width, new_height, frame_count)
         }
     }
 }

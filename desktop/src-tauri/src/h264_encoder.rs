@@ -20,7 +20,7 @@ impl H264Encoder {
 
         let config = EncoderConfig::new()
             .max_frame_rate(30.0)
-            .set_bitrate_bps(1_500_000) // 1.5 Mbps
+            .set_bitrate_bps(5_000_000) // 5 Mbps（最高画質）
             .enable_skip_frame(false); // フレームスキップを無効化
 
         let encoder = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
@@ -51,7 +51,7 @@ impl H264Encoder {
 
             let config = EncoderConfig::new()
                 .max_frame_rate(30.0)
-                .set_bitrate_bps(1_500_000) // 1.5 Mbps
+                .set_bitrate_bps(5_000_000) // 5 Mbps（最高画質）
                 .enable_skip_frame(false); // フレームスキップを無効化
 
             let new_encoder = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
