@@ -38,7 +38,7 @@ static H264_ENCODER: Lazy<ParkingMutex<Option<H264Encoder>>> = Lazy::new(|| {
 
 /// 現在のエンコーディングモード
 static ENCODING_MODE: Lazy<ParkingRwLock<EncodingMode>> = Lazy::new(|| {
-    ParkingRwLock::new(EncodingMode::H264) // デフォルトはH.264
+    ParkingRwLock::new(EncodingMode::Jpeg) // JPEGにフォールバック（H.264フラグメント問題回避）
 });
 
 /// Data Channel開通時にキーフレームを強制するフラグ
@@ -621,8 +621,8 @@ fn encode_frame_h264(bgra_data: &[u8], width: u32, height: u32, frame_count: u64
         return Some(vec![]);
     }
 
-    // 64KB以下なら1つのパケットで送信
-    let max_packet_size = 60 * 1024; // 60KB（余裕を持たせる）
+    // WebRTC Data Channelの制限（flutter_webrtcは16KB制限の可能性）
+    let max_packet_size = 15 * 1024; // 15KB（WebRTC安全圏）
     if h264_data.len() <= max_packet_size {
         // ヘッダー: [0x01] = H.264 single packet
         let mut packet = Vec::with_capacity(h264_data.len() + 1);

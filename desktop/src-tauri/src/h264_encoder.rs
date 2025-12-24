@@ -20,8 +20,8 @@ impl H264Encoder {
 
         let config = EncoderConfig::new()
             .max_frame_rate(30.0)
-            .set_bitrate_bps(2_000_000) // 2 Mbps
-            .enable_skip_frame(true);
+            .set_bitrate_bps(1_500_000) // 1.5 Mbps
+            .enable_skip_frame(false); // フレームスキップを無効化
 
         let encoder = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
             .map_err(|e| format!("Failed to create H.264 encoder: {:?}", e))?;
@@ -51,8 +51,8 @@ impl H264Encoder {
 
             let config = EncoderConfig::new()
                 .max_frame_rate(30.0)
-                .set_bitrate_bps(2_000_000)
-                .enable_skip_frame(true);
+                .set_bitrate_bps(1_500_000) // 1.5 Mbps
+                .enable_skip_frame(false); // フレームスキップを無効化
 
             let new_encoder = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
                 .map_err(|e| format!("Failed to recreate encoder: {:?}", e))?;
