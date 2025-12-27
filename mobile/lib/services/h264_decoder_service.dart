@@ -15,6 +15,7 @@ class H264DecoderService {
   Function(Uint8List data, int width, int height)? onFrame;
 
   bool _isInitialized = false;
+  bool _isDisposed = false;
 
   /// Initialize the decoder and start listening for frames
   Future<void> initialize() async {
@@ -22,6 +23,8 @@ class H264DecoderService {
 
     _frameSubscription = _eventChannel.receiveBroadcastStream().listen(
       (event) {
+        // 破棄後はコールバックを呼ばない
+        if (_isDisposed) return;
         if (event is Map) {
           final data = event['data'] as Uint8List?;
           final width = event['width'] as int?;
@@ -33,7 +36,7 @@ class H264DecoderService {
         }
       },
       onError: (error) {
-        print('[H264DecoderService] Stream error: $error');
+        if (_isDisposed) return;
       },
     );
 
@@ -65,9 +68,10 @@ class H264DecoderService {
 
   /// Dispose resources
   void dispose() {
+    _isDisposed = true;
+    onFrame = null; // コールバックをクリア
     _frameSubscription?.cancel();
     _frameSubscription = null;
     _isInitialized = false;
-    print('[H264DecoderService] Disposed');
   }
 }

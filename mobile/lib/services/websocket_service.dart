@@ -296,6 +296,9 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   ConnectionInfo? _connectionInfo;
   WebRTCService? _webrtcService;
 
+  // サービス破棄フラグ（破棄後のstate更新エラー防止）
+  bool _disposed = false;
+
   // H.264デコーダー（WebSocket経由のH.264フレーム用）
   H264DecoderService? _h264Decoder;
   bool _h264DecoderInitialized = false;
@@ -317,43 +320,50 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   // 安全にstateを更新（ウィジェット破棄後のエラーを防止）
   void _safeSetState(WebSocketState Function(WebSocketState) updater) {
+    // 破棄済みの場合は何もしない
+    if (_disposed) return;
     try {
       state = updater(state);
     } catch (e) {
       // ウィジェット破棄後のエラーを無視
-      print('[WebSocket] State update ignored (widget disposed): $e');
     }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _webrtcService?.close();
+    _webrtcService = null;
+    _h264Decoder?.dispose();
+    _h264Decoder = null;
+    _subscription?.cancel();
+    _channel?.sink.close();
+    _ptyOutputController.close();
+    _terminalContentController.close();
+    super.dispose();
   }
 
   Future<void> connect(ConnectionInfo info) async {
     _connectionInfo = info;
     _safeSetState((s) => s.copyWith(connectionState: WsConnectionState.connecting));
-    print('[WebSocket] Connecting to: ${info.wsUrl}');
-    print('[WebSocket] Token: ${info.token}');
-    print('[WebSocket] isExternal: ${info.isExternal}');
 
     try {
       _channel = WebSocketChannel.connect(Uri.parse(info.wsUrl));
-      print('[WebSocket] Channel created');
 
       _subscription = _channel!.stream.listen(
         _onMessage,
         onError: _onError,
         onDone: _onDone,
       );
-      print('[WebSocket] Stream listener attached');
 
       // 認証メッセージを送信（外部接続かどうかのフラグを含む）
-      final authMsg = {
+      _send({
         'type': 'auth',
         'token': info.token,
         'device_name': 'RemoteTouch',
         'is_external': info.isExternal,
-      };
-      print('[WebSocket] Sending auth: $authMsg');
-      _send(authMsg);
+      });
     } catch (e) {
-      print('[WebSocket] Connection error: $e');
       _safeSetState((s) => s.copyWith(
         connectionState: WsConnectionState.error,
         errorMessage: e.toString(),
@@ -367,6 +377,10 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
+    // H264デコーダーをリセット
+    _h264Decoder?.dispose();
+    _h264Decoder = null;
+    _h264DecoderInitialized = false;
     _safeSetState((_) => WebSocketState());
   }
 
@@ -397,8 +411,6 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   // WebRTC画面共有開始
   Future<void> startWebRTCScreenShare() async {
-    print('[WebRTC] Starting WebRTC screen share...');
-
     // WebRTCサービスを初期化
     _webrtcService = WebRTCService();
     await _webrtcService!.initialize();
@@ -413,14 +425,12 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     // 接続状態コールバック
     _webrtcService!.onConnectionStateChange = (stateStr) {
       if (_channel == null) return;
-      print('[WebRTC] Connection state: $stateStr');
       _safeSetState((s) => s.copyWith(webrtcConnectionState: stateStr));
     };
 
     // ICE候補コールバック（サーバーに送信）
     _webrtcService!.onIceCandidate = (candidateStr) {
       if (_channel == null) return;
-      print('[WebRTC] Sending ICE candidate');
       _send({
         'type': 'webrtc_ice_candidate',
         'candidate': candidateStr,
@@ -719,7 +729,6 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   // direction: "up", "down", "left", "right"
   // amount: スクロール量（デフォルト100）
   void scroll(String direction, {int amount = 100}) {
-    print('[WebSocket] Sending scroll: $direction, amount: $amount');
     _send({
       'type': 'scroll',
       'direction': direction,
@@ -822,12 +831,11 @@ class WebSocketService extends StateNotifier<WebSocketState> {
         await _h264Decoder!.initialize();
         // デコードされたフレームを受信するコールバック
         _h264Decoder!.onFrame = (jpegData, width, height) {
+          if (_disposed || _channel == null) return;
           _safeSetState((s) => s.copyWith(currentFrame: jpegData));
         };
         _h264DecoderInitialized = true;
-        print('[WS-H264] Decoder initialized');
       } catch (e) {
-        print('[WS-H264] Failed to initialize decoder: $e');
         return;
       }
     }
@@ -836,7 +844,7 @@ class WebSocketService extends StateNotifier<WebSocketState> {
     try {
       await _h264Decoder!.decode(h264Data);
     } catch (e) {
-      print('[WS-H264] Decode error: $e');
+      // Decode error - ignore
     }
   }
 
@@ -851,10 +859,8 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
     // テキストメッセージ（JSON）の処理
     try {
-      print('[WebSocket] Received message: ${message.toString().substring(0, message.toString().length > 200 ? 200 : message.toString().length)}');
       final data = jsonDecode(message as String) as Map<String, dynamic>;
       final type = data['type'] as String;
-      print('[WebSocket] Message type: $type');
 
       switch (type) {
         case 'auth_response':
@@ -921,8 +927,6 @@ class WebSocketService extends StateNotifier<WebSocketState> {
         case 'terminal_content':
           // 既存ターミナルのコンテンツ（スクロールバック含む）
           final content = data['content'] as String? ?? '';
-          final appName = data['app_name'] as String? ?? '';
-          print('[WebSocket] Received terminal_content for $appName: ${content.length} chars');
           // ストリームに通知
           _terminalContentController.add(content);
           // Completerがあれば完了
@@ -1006,13 +1010,11 @@ class WebSocketService extends StateNotifier<WebSocketState> {
         // WebRTCシグナリング
         case 'webrtc_offer':
           final sdp = data['sdp'] as String;
-          print('[WebRTC] Received offer, creating answer...');
           _handleWebRTCOffer(sdp);
           break;
 
         case 'webrtc_ice_candidate':
           final candidateJson = data['candidate'] as String;
-          print('[WebRTC] Received ICE candidate');
           _handleWebRTCIceCandidate(candidateJson);
           break;
       }
@@ -1023,40 +1025,30 @@ class WebSocketService extends StateNotifier<WebSocketState> {
 
   // WebRTCオファーを処理してアンサーを返す
   Future<void> _handleWebRTCOffer(String sdp) async {
-    if (_webrtcService == null) {
-      print('[WebRTC] Service not initialized');
-      return;
-    }
+    if (_webrtcService == null) return;
 
     final answer = await _webrtcService!.handleOffer(sdp);
     if (answer != null) {
-      print('[WebRTC] Sending answer');
       _send({
         'type': 'webrtc_answer',
         'sdp': answer,
       });
-    } else {
-      print('[WebRTC] Failed to create answer');
     }
   }
 
   // WebRTC ICE候補を追加
   Future<void> _handleWebRTCIceCandidate(String candidateJson) async {
-    if (_webrtcService == null) {
-      print('[WebRTC] Service not initialized');
-      return;
-    }
+    if (_webrtcService == null) return;
 
     try {
       final candidateMap = jsonDecode(candidateJson) as Map<String, dynamic>;
       await _webrtcService!.addIceCandidate(candidateMap);
     } catch (e) {
-      print('[WebRTC] Error parsing ICE candidate: $e');
+      // ICE candidate error - ignore
     }
   }
 
   void _onError(dynamic error) {
-    print('[WebSocket] Error: $error');
     _safeSetState((s) => s.copyWith(
       connectionState: WsConnectionState.error,
       errorMessage: error.toString(),
@@ -1064,16 +1056,29 @@ class WebSocketService extends StateNotifier<WebSocketState> {
   }
 
   void _onDone() {
-    print('[WebSocket] Connection closed (onDone)');
+    // WebRTCとH264デコーダーをクリーンアップ
+    _webrtcService?.close();
+    _webrtcService = null;
+    _h264Decoder?.dispose();
+    _h264Decoder = null;
+    _h264DecoderInitialized = false;
+
     // 接続中に切断された場合は認証失敗の可能性が高い
     if (state.connectionState == WsConnectionState.connecting) {
-      print('[WebSocket] Connection closed during auth - likely auth failure');
       _safeSetState((s) => s.copyWith(
         connectionState: WsConnectionState.error,
         errorMessage: '認証に失敗しました。QRコードを再スキャンしてください。',
+        currentFrame: null,
+        isScreenSharing: false,
+        isWebRTCActive: false,
       ));
     } else {
-      _safeSetState((s) => s.copyWith(connectionState: WsConnectionState.disconnected));
+      _safeSetState((s) => s.copyWith(
+        connectionState: WsConnectionState.disconnected,
+        currentFrame: null,
+        isScreenSharing: false,
+        isWebRTCActive: false,
+      ));
     }
     // 接続情報をクリア
     _connectionInfo = null;

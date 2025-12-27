@@ -284,23 +284,52 @@ impl SystemController {
     /// アプリをフォーカス（アクティブに）- macOS版
     #[cfg(target_os = "macos")]
     pub fn focus_app(app_name: &str) -> bool {
-        // タイムアウト付きでアプリをアクティブ化
-        // 一部のアプリ（Messages等）はactivateがハングすることがある
+        // まずbundle identifierを取得してからアクティベート
+        // プロセス名とアプリ名が異なる場合（例: AdobeAcrobat → Adobe Acrobat DC）に対応
         let script = format!(
             r#"
-            with timeout of 2 seconds
-                tell application "{}" to activate
+            with timeout of 5 seconds
+                tell application "System Events"
+                    try
+                        set targetProcess to first process whose name is "{}"
+                        set bundleId to bundle identifier of targetProcess
+                        tell application id bundleId to activate
+                        return "success"
+                    on error
+                        -- フォールバック: 直接アプリ名でアクティベート
+                        try
+                            tell application "{}" to activate
+                            return "success"
+                        on error errMsg
+                            return "error: " & errMsg
+                        end try
+                    end try
+                end tell
             end timeout
             "#,
+            app_name.replace("\"", "\\\""),
             app_name.replace("\"", "\\\"")
         );
 
-        Command::new("osascript")
+        let output = Command::new("osascript")
             .arg("-e")
             .arg(&script)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .output();
+
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if !stderr.is_empty() {
+                    eprintln!("[focus_app] stderr: {}", stderr);
+                }
+                stdout.trim().starts_with("success")
+            }
+            Err(e) => {
+                eprintln!("[focus_app] Failed: {}", e);
+                false
+            }
+        }
     }
 
     /// アプリをフォーカス（アクティブに）- Windows版
@@ -459,11 +488,23 @@ impl SystemController {
     pub fn focus_app_window(app_name: &str, window_index: usize) -> bool {
         let escaped_name = app_name.replace("\"", "\\\"");
 
-        // まずアプリ自体をアクティベートしてから、特定のウィンドウを最前面に
+        // まずbundle identifier経由でアプリをアクティベートしてから、
+        // 特定のウィンドウを最前面に。最小化されている場合は解除する
         let script = format!(
             r#"
-            -- まずアプリをアクティベート
-            tell application "{}" to activate
+            -- まずアプリをアクティベート（bundle identifier経由）
+            tell application "System Events"
+                try
+                    set targetProcess to first process whose name is "{}"
+                    set bundleId to bundle identifier of targetProcess
+                    tell application id bundleId to activate
+                on error
+                    -- フォールバック
+                    try
+                        tell application "{}" to activate
+                    end try
+                end try
+            end tell
             delay 0.1
 
             -- 次に特定のウィンドウを最前面に
@@ -472,13 +513,21 @@ impl SystemController {
                     try
                         -- 指定ウィンドウを取得
                         set targetWindow to window {}
+
+                        -- 最小化されている場合は解除
+                        set isMinimized to value of attribute "AXMinimized" of targetWindow
+                        if isMinimized then
+                            set value of attribute "AXMinimized" of targetWindow to false
+                            delay 0.2
+                        end if
+
                         -- ウィンドウを最前面に上げる
                         perform action "AXRaise" of targetWindow
                     end try
                 end tell
             end tell
             "#,
-            escaped_name, escaped_name, window_index
+            escaped_name, escaped_name, escaped_name, window_index
         );
 
         Command::new("osascript")
@@ -1805,21 +1854,41 @@ impl SystemController {
     #[cfg(target_os = "macos")]
     pub fn get_frontmost_window() -> Option<AppWindowInfo> {
         // タイムアウト付きでウィンドウ情報を取得
+        // Electron系アプリは特に時間がかかるので長めに設定
         let script = r#"
-            with timeout of 3 seconds
+            with timeout of 8 seconds
                 tell application "System Events"
                     set frontApp to first application process whose frontmost is true
                     set appName to name of frontApp
 
                     try
-                        set frontWindow to first window of frontApp
+                        -- ウィンドウが複数ある場合、最初の非最小化ウィンドウを優先
+                        set frontWindow to missing value
+                        repeat with w in windows of frontApp
+                            try
+                                set isMin to value of attribute "AXMinimized" of w
+                                if isMin is false then
+                                    set frontWindow to w
+                                    exit repeat
+                                end if
+                            on error
+                                -- AXMinimized取得失敗時はそのウィンドウを使用
+                                set frontWindow to w
+                                exit repeat
+                            end try
+                        end repeat
+
+                        if frontWindow is missing value then
+                            set frontWindow to first window of frontApp
+                        end if
+
                         set winName to name of frontWindow
                         set winPos to position of frontWindow
                         set winSize to size of frontWindow
 
                         return appName & "|" & winName & "|" & (item 1 of winPos) & "|" & (item 2 of winPos) & "|" & (item 1 of winSize) & "|" & (item 2 of winSize)
-                    on error
-                        return appName & "|" & "No Window" & "|0|0|0|0"
+                    on error errMsg
+                        return appName & "|No Window|0|0|0|0"
                     end try
                 end tell
             end timeout
@@ -1833,16 +1902,31 @@ impl SystemController {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+
+                if !stderr.is_empty() {
+                    eprintln!("[get_frontmost_window] stderr: {}", stderr);
+                }
+
                 let parts: Vec<&str> = stdout.trim().split('|').collect();
 
                 if parts.len() >= 6 {
+                    let width = parts[4].parse().unwrap_or(0);
+                    let height = parts[5].parse().unwrap_or(0);
+
+                    // 幅または高さが0の場合のみ無効（小さいウィンドウは許可）
+                    if width == 0 || height == 0 {
+                        eprintln!("[get_frontmost_window] Invalid window size: {}x{}", width, height);
+                        return None;
+                    }
+
                     Some(AppWindowInfo {
                         app_name: parts[0].to_string(),
                         window_title: parts[1].to_string(),
                         x: parts[2].parse().unwrap_or(0),
                         y: parts[3].parse().unwrap_or(0),
-                        width: parts[4].parse().unwrap_or(0),
-                        height: parts[5].parse().unwrap_or(0),
+                        width,
+                        height,
                     })
                 } else {
                     None

@@ -1065,13 +1065,30 @@ async fn handle_connection(
 
 // 画面キャプチャ開始
 fn start_screen_capture(state: &Arc<AppState>) -> Result<(), String> {
+    // xcapでネイティブ解像度を確認
+    if let Ok(monitors) = xcap::Monitor::all() {
+        for monitor in &monitors {
+            println!("[xcap] Monitor: {:?}", monitor.name());
+            if let (Ok(w), Ok(h)) = (monitor.width(), monitor.height()) {
+                println!("[xcap]   Logical dimensions: {}x{}", w, h);
+            }
+            if let Ok(scale) = monitor.scale_factor() {
+                println!("[xcap]   Scale factor: {}", scale);
+            }
+            // 実際のキャプチャサイズを確認
+            if let Ok(img) = monitor.capture_image() {
+                println!("[xcap]   Captured image size: {}x{}", img.width(), img.height());
+            }
+        }
+    }
+
     let capturer = ScreenCapturer::new()?;
     let (width, height) = capturer.get_dimensions();
 
     *state.screen_width.write() = width as u32;
     *state.screen_height.write() = height as u32;
 
-    println!("Screen capture initialized: {}x{}", width, height);
+    println!("[scrap] Screen capture initialized: {}x{}", width, height);
 
     // キャプチャスレッドを開始（領域指定対応）
     ScreenCapturer::start_capture(width, height, state.frame_tx.clone(), state.capture_region.clone(), state.ws_capture_running.clone());
@@ -1454,6 +1471,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_connection_info,

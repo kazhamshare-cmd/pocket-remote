@@ -64,10 +64,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   bool _useWebRTC = false; // WebSocketモード（TCP経由でH.264、サイズ制限なし）
 
   // ピンチズーム対応
-  double _viewZoomScale = 2.0; // 通常モードのズーム倍率（初期値2倍）
-  double _minZoom = 0.5; // 最小ズーム（全体表示）
-  double _maxZoom = 5.0; // 最大ズーム（5倍）
-  double _lastScale = 1.0; // ピンチ開始時のスケール
+  double _viewZoomScale = 0.5; // 通常モードのズーム倍率（初期値0.5倍で広範囲表示）
+  double _minZoom = 0.15; // 最小ズーム（画面全体を俯瞰）
+  double _maxZoom = 3.0; // 最大ズーム（3倍、ネイティブ解像度が高いため）
+  double _lastScale = 0.5; // ピンチ開始時のスケール
   bool _isPinching = false; // ピンチ中フラグ
 
   // ターミナル閲覧モード（既存ターミナルに接続）
@@ -127,31 +127,59 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
         title: const Text('ショートカット追加', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: labelController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'ボタン名',
-                labelStyle: TextStyle(color: Colors.white70),
-                hintText: '例: yes, /help',
-                hintStyle: TextStyle(color: Colors.white38),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: labelController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: 'ボタン名',
+                  labelStyle: TextStyle(color: Colors.white70),
+                  hintText: '例: 履歴検索',
+                  hintStyle: TextStyle(color: Colors.white38),
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: commandController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'コマンド（送信する文字列）',
-                labelStyle: TextStyle(color: Colors.white70),
-                hintText: '例: yes, /compact',
-                hintStyle: TextStyle(color: Colors.white38),
+              const SizedBox(height: 12),
+              TextField(
+                controller: commandController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: 'コマンド / キー',
+                  labelStyle: TextStyle(color: Colors.white70),
+                  hintText: '例: ctrl+r',
+                  hintStyle: TextStyle(color: Colors.white38),
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 16),
+              const Text(
+                '入力形式:',
+                style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('• 文字列: yes, /help, git status', style: TextStyle(color: Colors.white60, fontSize: 11)),
+                    SizedBox(height: 2),
+                    Text('• 単一キー: tab, escape, enter, up, down', style: TextStyle(color: Colors.white60, fontSize: 11)),
+                    SizedBox(height: 2),
+                    Text('• 修飾キー: ctrl+c, cmd+s, alt+f4', style: TextStyle(color: Colors.white60, fontSize: 11)),
+                    SizedBox(height: 2),
+                    Text('• 複合: ctrl+shift+r, cmd+shift+p', style: TextStyle(color: Colors.white60, fontSize: 11)),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -205,6 +233,140 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             child: const Text('削除', style: TextStyle(color: Colors.red)),
           ),
         ],
+      ),
+    );
+  }
+
+  // ショートカット管理ダイアログ（並べ替え・削除）
+  void _showManageShortcutsDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF16213e),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('ショートカット管理', style: TextStyle(color: Colors.white)),
+              IconButton(
+                onPressed: () {
+                  Navigator.pop(dialogContext);
+                  _showAddShortcutDialog();
+                },
+                icon: const Icon(Icons.add, color: Colors.cyan),
+                tooltip: '追加',
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: _customShortcuts.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text(
+                      'ショートカットがありません\n右上の＋で追加してください',
+                      style: TextStyle(color: Colors.white54),
+                      textAlign: TextAlign.center,
+                    ),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _customShortcuts.length,
+                    itemBuilder: (context, index) {
+                      final shortcut = _customShortcuts[index];
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.cyan.withOpacity(0.3)),
+                        ),
+                        child: Row(
+                          children: [
+                            // 上移動ボタン
+                            IconButton(
+                              onPressed: index == 0
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        final item = _customShortcuts.removeAt(index);
+                                        _customShortcuts.insert(index - 1, item);
+                                      });
+                                      setDialogState(() {});
+                                      _saveCustomShortcuts();
+                                    },
+                              icon: Icon(
+                                Icons.arrow_upward,
+                                color: index == 0 ? Colors.white24 : Colors.white70,
+                                size: 20,
+                              ),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                            ),
+                            // 下移動ボタン
+                            IconButton(
+                              onPressed: index == _customShortcuts.length - 1
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        final item = _customShortcuts.removeAt(index);
+                                        _customShortcuts.insert(index + 1, item);
+                                      });
+                                      setDialogState(() {});
+                                      _saveCustomShortcuts();
+                                    },
+                              icon: Icon(
+                                Icons.arrow_downward,
+                                color: index == _customShortcuts.length - 1 ? Colors.white24 : Colors.white70,
+                                size: 20,
+                              ),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                            ),
+                            const SizedBox(width: 8),
+                            // ラベルとコマンド
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    shortcut['label'] ?? '',
+                                    style: const TextStyle(color: Colors.cyan, fontSize: 14),
+                                  ),
+                                  Text(
+                                    shortcut['command'] ?? '',
+                                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // 削除ボタン
+                            IconButton(
+                              onPressed: () {
+                                setState(() {
+                                  _customShortcuts.removeAt(index);
+                                });
+                                setDialogState(() {});
+                                _saveCustomShortcuts();
+                              },
+                              icon: const Icon(Icons.delete_outline, color: Colors.red, size: 20),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('閉じる'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -736,14 +898,8 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   void _zoomToWindow(AppWindowInfo windowInfo, Size screenSize, ScreenInfo? screenInfo) {
     if (screenInfo == null) return;
 
-    print('[ZoomToWindow] === START ===');
-    print('[ZoomToWindow] App: ${windowInfo.appName}');
-    print('[ZoomToWindow] Window: x=${windowInfo.x}, y=${windowInfo.y}, ${windowInfo.width}x${windowInfo.height}');
-    print('[ZoomToWindow] ScreenSize: ${screenSize.width}x${screenSize.height}');
-
     // 小さすぎるウィンドウはスキップ（サイドバーや補助ウィンドウの可能性）
     if (windowInfo.width < 100 || windowInfo.height < 100) {
-      print('[ZoomToWindow] Window too small, skipping');
       return;
     }
 
@@ -757,8 +913,6 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     int captureY = windowInfo.y;
     int captureWidth = windowInfo.width;
     int captureHeight = windowInfo.height;
-
-    print('[ZoomToWindow] Capture region: x=$captureX, y=$captureY, ${captureWidth}x$captureHeight (full window)');
 
     // キャプチャ領域を設定（リサイズなし、即時反映）
     ref.read(webSocketProvider.notifier).setCaptureRegion(
@@ -793,11 +947,17 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     const double screenDisplayHeight = 380;
 
     return PopScope(
-      canPop: !_ptyMode, // PTYモード中はポップしない
+      canPop: false, // 画面共有中はシステム戻るボタンでポップしない
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _ptyMode) {
-          // PTYモード中に戻るボタンを押した場合はPTYモードを終了
-          _exitPtyMode();
+        if (!didPop) {
+          if (_ptyMode) {
+            // PTYモード中 → デスクトップに戻る
+            _exitPtyMode();
+          } else if (_focusedWindow != null) {
+            // アプリにズーム中 → デスクトップに戻る
+            _resetZoom();
+          }
+          // デスクトップ表示中は何もしない（切断は右上のボタンで行う）
         }
       },
       child: Scaffold(
@@ -1174,8 +1334,14 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                             IconButton(
                               icon: const Icon(Icons.arrow_back, color: Colors.white),
                               onPressed: () {
-                                _stopScreenShare();
-                                context.go('/commands');
+                                if (_ptyMode) {
+                                  // PTYモード中 → デスクトップに戻る
+                                  _exitPtyMode();
+                                } else if (_focusedWindow != null) {
+                                  // アプリにズーム中 → デスクトップに戻る
+                                  _resetZoom();
+                                }
+                                // デスクトップ表示中は何もしない（切断は右上のボタンで行う）
                               },
                             ),
                             // ステータスインジケーター
@@ -1660,6 +1826,8 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                         _customShortcutButton(entry.key, entry.value['label']!, entry.value['command']!)),
                       // 追加ボタン
                       _addShortcutButton(),
+                      // 管理ボタン（並べ替え・削除）
+                      _manageShortcutsButton(),
                     ]
                   : [
                       // 通常モード用ショートカット
@@ -1897,6 +2065,25 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             border: Border.all(color: Colors.white24),
           ),
           child: const Icon(Icons.add, color: Colors.white54, size: 16),
+        ),
+      ),
+    );
+  }
+
+  // ショートカット管理ボタン（並べ替え・削除）
+  Widget _manageShortcutsButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: _showManageShortcutsDialog,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: const Icon(Icons.settings, color: Colors.white54, size: 16),
         ),
       ),
     );
@@ -2449,46 +2636,24 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     );
   }
 
-  // アプリにズーム（ウィンドウ情報を取得してからズーム）
+  // アプリをフォーカス（ウィンドウを左上に移動、自動ズームなし）
   void _zoomToApp(String appName, Size screenSize, ScreenInfo? screenInfo) async {
-    print('[ZoomToApp] Starting zoom for: $appName');
-
     // ターミナルアプリのみPTYモードに切り替え（IDE/エディタは通常の画面共有）
     final terminalApps = ['Terminal', 'iTerm', 'iTerm2', 'Hyper', 'Alacritty', 'kitty', 'Warp'];
     // 完全一致または明確なターミナルアプリ名のみマッチ
     if (terminalApps.any((t) => appName == t || appName.startsWith('$t '))) {
-      print('[ZoomToApp] Terminal app detected ($appName), switching to PTY mode');
       if (mounted) {
         _startPtyMode(appName);
       }
       return;
     }
 
-    // アプリをフォーカスしてウィンドウ情報を取得
+    // アプリをフォーカスしてウィンドウを左上に移動（自動ズームなし）
+    // ユーザーがピンチで自由に拡大できる
     ref.read(webSocketProvider.notifier).focusAndGetWindow(appName);
 
-    // ウィンドウ情報が届くのを待つ（最大3秒、150ms間隔でチェック）
-    for (var i = 0; i < 20; i++) {
-      await Future.delayed(const Duration(milliseconds: 150));
-      final state = ref.read(webSocketProvider);
-      print('[ZoomToApp] Checking windowInfo (attempt $i): ${state.windowInfo}');
-      if (state.windowInfo != null) {
-        print('[ZoomToApp] WindowInfo received: ${state.windowInfo!.x}, ${state.windowInfo!.y}, ${state.windowInfo!.width}x${state.windowInfo!.height}');
-        _zoomToWindow(state.windowInfo!, screenSize, screenInfo);
-        return;
-      }
-    }
-    print('[ZoomToApp] WindowInfo not received within timeout');
-    // タイムアウト時はエラーメッセージを表示
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$appName のウィンドウを取得できませんでした'),
-          backgroundColor: Colors.red.shade700,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    }
+    // フォーカス完了を少し待つ
+    await Future.delayed(const Duration(milliseconds: 500));
   }
 
   void _showBrowserTabsSheet(String appName, Size screenSize, ScreenInfo? screenInfo) {

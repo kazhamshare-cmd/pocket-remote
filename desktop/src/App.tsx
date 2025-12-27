@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 interface ConnectionInfo {
   ip: string;
@@ -70,7 +72,31 @@ function App() {
   // 音を鳴らした最後のリクエストIDを記録（重複防止）
   const lastSoundRequestId = useRef<string | null>(null);
 
+  // アップデート関連
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; notes?: string } | null>(null);
+  const [updateDownloading, setUpdateDownloading] = useState(false);
+
   useEffect(() => {
+    // アップデートをチェック
+    const checkForUpdates = async () => {
+      try {
+        console.log("[Updater] Checking for updates...");
+        const update = await check();
+        if (update) {
+          console.log(`[Updater] Update available: v${update.version}`);
+          setUpdateAvailable({
+            version: update.version,
+            notes: update.body || undefined,
+          });
+        } else {
+          console.log("[Updater] No updates available");
+        }
+      } catch (e) {
+        console.error("[Updater] Failed to check for updates:", e);
+      }
+    };
+    checkForUpdates();
+
     // アクセシビリティ権限をチェック（プロンプトは表示しない）
     const checkPermissions = async () => {
       try {
@@ -245,6 +271,22 @@ function App() {
     }
   };
 
+  const handleUpdate = async () => {
+    try {
+      setUpdateDownloading(true);
+      const update = await check();
+      if (update) {
+        console.log("[Updater] Downloading and installing update...");
+        await update.downloadAndInstall();
+        console.log("[Updater] Relaunching...");
+        await relaunch();
+      }
+    } catch (e) {
+      console.error("[Updater] Failed to update:", e);
+      setUpdateDownloading(false);
+    }
+  };
+
   return (
     <div className="container">
       <h1>RemoteTouch</h1>
@@ -274,6 +316,33 @@ function App() {
             </div>
             <p className="dialog-timeout">Auto-denied after 30 seconds</p>
           </div>
+        </div>
+      )}
+
+      {/* アップデート通知 / Update Notification */}
+      {updateAvailable && (
+        <div className="update-banner">
+          <div className="update-content">
+            <span className="update-icon">🎉</span>
+            <span className="update-text">
+              New version v{updateAvailable.version} available!
+            </span>
+          </div>
+          {updateDownloading ? (
+            <div className="update-progress">
+              <div className="spinner small"></div>
+              <span>Updating...</span>
+            </div>
+          ) : (
+            <div className="update-buttons">
+              <button className="update-button" onClick={handleUpdate}>
+                Update Now
+              </button>
+              <button className="update-dismiss" onClick={() => setUpdateAvailable(null)}>
+                Later
+              </button>
+            </div>
+          )}
         </div>
       )}
 

@@ -32,15 +32,10 @@ class H264Decoder: NSObject {
 
     /// Decode H.264 data (can contain multiple NAL units)
     func decode(_ h264Data: Data) -> Bool {
-        print("[H264Decoder] Received \(h264Data.count) bytes")
-
         // Parse NAL units from the data
         let nalUnits = parseNALUnits(h264Data)
-        print("[H264Decoder] Found \(nalUnits.count) NAL units")
 
-        for (index, nalUnit) in nalUnits.enumerated() {
-            let nalType = nalUnit.count > 0 ? nalUnit[0] & 0x1F : 0
-            print("[H264Decoder] NAL \(index): type=\(nalType), size=\(nalUnit.count)")
+        for nalUnit in nalUnits {
             if !processNALUnit(nalUnit) {
                 return false
             }
@@ -108,12 +103,10 @@ class H264Decoder: NSObject {
         switch nalType {
         case NAL_TYPE_SPS:
             sps = nalUnit
-            print("[H264Decoder] SPS received: \(nalUnit.count) bytes")
             return createFormatDescription()
 
         case NAL_TYPE_PPS:
             pps = nalUnit
-            print("[H264Decoder] PPS received: \(nalUnit.count) bytes")
             return createFormatDescription()
 
         case NAL_TYPE_IDR, NAL_TYPE_NON_IDR:
@@ -128,11 +121,8 @@ class H264Decoder: NSObject {
     /// Create format description from SPS and PPS
     private func createFormatDescription() -> Bool {
         guard let spsData = sps, let ppsData = pps else {
-            print("[H264Decoder] Waiting for SPS and PPS (sps=\(sps != nil), pps=\(pps != nil))")
             return true // Not ready yet, but not an error
         }
-
-        print("[H264Decoder] Creating format description with SPS(\(spsData.count) bytes) and PPS(\(ppsData.count) bytes)")
 
         // Convert Data to [UInt8] arrays
         let spsArray = [UInt8](spsData)
@@ -161,15 +151,10 @@ class H264Decoder: NSObject {
         }
 
         if status != noErr {
-            print("[H264Decoder] Failed to create format description: \(status)")
-            // Print first few bytes of SPS and PPS for debugging
-            print("[H264Decoder] SPS first bytes: \(spsArray.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " "))")
-            print("[H264Decoder] PPS first bytes: \(ppsArray.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " "))")
             return false
         }
 
         formatDescription = newFormatDescription
-        print("[H264Decoder] Format description created successfully")
 
         return createDecompressionSession()
     }
@@ -207,19 +192,16 @@ class H264Decoder: NSObject {
         )
 
         if status != noErr {
-            print("[H264Decoder] Failed to create decompression session: \(status)")
             return false
         }
 
         decompressionSession = session
-        print("[H264Decoder] Decompression session created")
         return true
     }
 
     /// Decode a video frame
     private func decodeFrame(_ nalUnit: Data, isKeyframe: Bool) -> Bool {
         guard let session = decompressionSession, let formatDesc = formatDescription else {
-            print("[H264Decoder] Session not ready")
             return false
         }
 
@@ -248,7 +230,6 @@ class H264Decoder: NSObject {
         }
 
         if status != noErr {
-            print("[H264Decoder] Failed to create block buffer: \(status)")
             return false
         }
 
@@ -269,7 +250,6 @@ class H264Decoder: NSObject {
         )
 
         if status != noErr {
-            print("[H264Decoder] Failed to create sample buffer: \(status)")
             return false
         }
 
@@ -286,7 +266,6 @@ class H264Decoder: NSObject {
         )
 
         if status != noErr {
-            print("[H264Decoder] Decode error: \(status)")
             return false
         }
 
@@ -315,24 +294,13 @@ private func decompressionCallback(
     presentationTimeStamp: CMTime,
     presentationDuration: CMTime
 ) {
-    guard status == noErr else {
-        print("[H264Decoder] Decompression callback error: \(status)")
-        return
-    }
-
-    guard let pixelBuffer = imageBuffer else {
-        print("[H264Decoder] No image buffer")
-        return
-    }
-
+    guard status == noErr else { return }
+    guard let pixelBuffer = imageBuffer else { return }
     guard let refCon = decompressionOutputRefCon else { return }
     let decoder = Unmanaged<H264Decoder>.fromOpaque(refCon).takeUnretainedValue()
 
     // Convert CVPixelBuffer to JPEG
-    guard let jpegData = pixelBufferToJPEG(pixelBuffer: pixelBuffer, quality: 0.8) else {
-        print("[H264Decoder] Failed to convert to JPEG")
-        return
-    }
+    guard let jpegData = pixelBufferToJPEG(pixelBuffer: pixelBuffer, quality: 0.8) else { return }
 
     let width = CVPixelBufferGetWidth(pixelBuffer)
     let height = CVPixelBufferGetHeight(pixelBuffer)
@@ -375,8 +343,6 @@ class H264DecoderPlugin: NSObject, FlutterPlugin {
         let instance = H264DecoderPlugin()
         registrar.addMethodCallDelegate(instance, channel: channel)
         eventChannel.setStreamHandler(instance)
-
-        print("[H264DecoderPlugin] Registered")
     }
 
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {

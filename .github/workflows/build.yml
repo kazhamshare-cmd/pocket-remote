@@ -43,8 +43,11 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build Tauri App
+      - name: Build Tauri App (with signing)
         working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target ${{ matrix.target }}
 
       - name: Upload macOS DMG
@@ -53,6 +56,15 @@ jobs:
         with:
           name: RemoteTouch-${{ matrix.name }}
           path: desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+
+      - name: Upload macOS Updater Artifacts
+        if: startsWith(matrix.platform, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemoteTouch-${{ matrix.name }}-updater
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.tar.gz
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.tar.gz.sig
 
       - name: Upload Windows Installer
         if: matrix.platform == 'windows-latest'
@@ -63,21 +75,131 @@ jobs:
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
 
+      - name: Upload Windows Updater Artifacts
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemoteTouch-${{ matrix.name }}-updater
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.nsis.zip
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.nsis.zip.sig
+
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create latest.json for updater
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          REPO="kazhamshare-cmd/pocket-remote"
+
+          # Read signature files
+          MACOS_ARM64_SIG=""
+          MACOS_X64_SIG=""
+          WINDOWS_SIG=""
+
+          if [ -f "artifacts/RemoteTouch-macOS-arm64-updater/RemoteTouch.app.tar.gz.sig" ]; then
+            MACOS_ARM64_SIG=$(cat "artifacts/RemoteTouch-macOS-arm64-updater/RemoteTouch.app.tar.gz.sig")
+          fi
+
+          if [ -f "artifacts/RemoteTouch-macOS-x64-updater/RemoteTouch.app.tar.gz.sig" ]; then
+            MACOS_X64_SIG=$(cat "artifacts/RemoteTouch-macOS-x64-updater/RemoteTouch.app.tar.gz.sig")
+          fi
+
+          # Find Windows signature file
+          WINDOWS_SIG_FILE=$(find artifacts/RemoteTouch-Windows-x64-updater -name "*.nsis.zip.sig" 2>/dev/null | head -1)
+          if [ -n "$WINDOWS_SIG_FILE" ]; then
+            WINDOWS_SIG=$(cat "$WINDOWS_SIG_FILE")
+          fi
+
+          # Create latest.json
+          cat > artifacts/latest.json << EOF
+          {
+            "version": "${VERSION}",
+            "notes": "RemoteTouch v${VERSION}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${MACOS_ARM64_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/v${VERSION}/RemoteTouch.app.tar.gz"
+              },
+              "darwin-x86_64": {
+                "signature": "${MACOS_X64_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/v${VERSION}/RemoteTouch_x64.app.tar.gz"
+              },
+              "windows-x86_64": {
+                "signature": "${WINDOWS_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/v${VERSION}/RemoteTouch_${VERSION}_x64-setup.nsis.zip"
+              }
+            }
+          }
+          EOF
+
+          cat artifacts/latest.json
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # macOS ARM64
+          if [ -d "artifacts/RemoteTouch-macOS-arm64" ]; then
+            cp artifacts/RemoteTouch-macOS-arm64/*.dmg release/ 2>/dev/null || true
+          fi
+          if [ -d "artifacts/RemoteTouch-macOS-arm64-updater" ]; then
+            cp artifacts/RemoteTouch-macOS-arm64-updater/*.tar.gz release/ 2>/dev/null || true
+            cp artifacts/RemoteTouch-macOS-arm64-updater/*.tar.gz.sig release/ 2>/dev/null || true
+          fi
+
+          # macOS x64
+          if [ -d "artifacts/RemoteTouch-macOS-x64" ]; then
+            # Rename x64 DMG to avoid collision
+            for f in artifacts/RemoteTouch-macOS-x64/*.dmg; do
+              [ -f "$f" ] && cp "$f" "release/$(basename "${f%.dmg}")_x64.dmg"
+            done
+          fi
+          if [ -d "artifacts/RemoteTouch-macOS-x64-updater" ]; then
+            for f in artifacts/RemoteTouch-macOS-x64-updater/*.tar.gz; do
+              [ -f "$f" ] && cp "$f" "release/$(basename "${f%.tar.gz}")_x64.tar.gz"
+            done
+            for f in artifacts/RemoteTouch-macOS-x64-updater/*.tar.gz.sig; do
+              [ -f "$f" ] && cp "$f" "release/$(basename "${f%.tar.gz.sig}")_x64.tar.gz.sig"
+            done
+          fi
+
+          # Windows
+          if [ -d "artifacts/RemoteTouch-Windows-x64" ]; then
+            cp artifacts/RemoteTouch-Windows-x64/*.exe release/ 2>/dev/null || true
+            cp artifacts/RemoteTouch-Windows-x64/*.msi release/ 2>/dev/null || true
+          fi
+          if [ -d "artifacts/RemoteTouch-Windows-x64-updater" ]; then
+            cp artifacts/RemoteTouch-Windows-x64-updater/*.nsis.zip release/ 2>/dev/null || true
+            cp artifacts/RemoteTouch-Windows-x64-updater/*.nsis.zip.sig release/ 2>/dev/null || true
+          fi
+
+          # latest.json
+          cp artifacts/latest.json release/
+
+          ls -la release/
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*
+          files: release/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

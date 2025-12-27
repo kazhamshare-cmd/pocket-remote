@@ -597,3 +597,79 @@ h2 {
   padding: 1rem;
   font-size: 0.9rem;
 }
+
+/* アップデートバナー / Update Banner */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: linear-gradient(135deg, #2d5016, #1a3a0a);
+  border: 1px solid #4caf50;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.update-content {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.update-icon {
+  font-size: 1.2rem;
+}
+
+.update-text {
+  font-size: 0.9rem;
+  color: #c8e6c9;
+}
+
+.update-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.update-button {
+  background: #4caf50;
+  color: white;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.update-button:hover {
+  background: #66bb6a;
+}
+
+.update-dismiss {
+  background: transparent;
+  color: #a5d6a7;
+  border: 1px solid #4caf50;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.update-dismiss:hover {
+  background: rgba(76, 175, 80, 0.1);
+}
+
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #a5d6a7;
+  font-size: 0.85rem;
+}
+
+.spinner.small {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
