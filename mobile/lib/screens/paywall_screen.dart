@@ -382,7 +382,7 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
   }
 
   Future<void> _showTerms(BuildContext context, L10n l10n) async {
-    final url = Uri.parse('https://b19.co.jp/remotetouch/terms.html');
+    final url = Uri.parse('https://b19.co.jp/terms-of-service/');
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     }
@@ -399,7 +399,7 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
   }
 
   Future<void> _showPrivacy(BuildContext context, L10n l10n) async {
-    final url = Uri.parse('https://b19.co.jp/remotetouch/privacy.html');
+    final url = Uri.parse('https://b19.co.jp/privacy-policy/');
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     }

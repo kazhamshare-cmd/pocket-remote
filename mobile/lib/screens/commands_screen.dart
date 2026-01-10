@@ -13,15 +13,24 @@ class CommandsScreen extends ConsumerStatefulWidget {
 }
 
 class _CommandsScreenState extends ConsumerState<CommandsScreen> {
+  bool _wasConnected = false; // 一度でも接続成功したかどうか
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(webSocketProvider);
     final l10n = ref.watch(l10nProvider);
     final language = ref.watch(languageProvider);
 
-    // 接続が切れたらスキャン画面に戻る
-    if (state.connectionState == WsConnectionState.disconnected ||
-        state.connectionState == WsConnectionState.error) {
+    // 接続成功を記録
+    if (state.connectionState == WsConnectionState.connected) {
+      _wasConnected = true;
+    }
+
+    // 一度接続成功した後に切れた場合のみスキャン画面に戻る
+    // （初回ビルド時のレースコンディションを防ぐ）
+    if (_wasConnected &&
+        (state.connectionState == WsConnectionState.disconnected ||
+         state.connectionState == WsConnectionState.error)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           ref.read(subscriptionProvider.notifier).resetLoadingState();

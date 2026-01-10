@@ -58,12 +58,20 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
   }
 
   void _onDetect(BarcodeCapture capture) {
-    if (_isProcessing) return;
+    print('[ScanScreen] _onDetect called, _isProcessing=$_isProcessing');
+    if (_isProcessing) {
+      print('[ScanScreen] Already processing, ignoring');
+      return;
+    }
 
     final List<Barcode> barcodes = capture.barcodes;
     for (final barcode in barcodes) {
       if (barcode.rawValue != null) {
         _isProcessing = true;
+        // 2重検出を防ぐためカメラを停止
+        print('[ScanScreen] QR detected, stopping camera...');
+        cameraController.stop();
+        print('[ScanScreen] Camera stopped, calling _processQrCode');
         _processQrCode(barcode.rawValue!);
         break;
       }
@@ -72,35 +80,61 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
 
   Future<void> _processQrCode(String data) async {
     final l10n = ref.read(l10nProvider);
+    print('[ScanScreen] _processQrCode started, data=$data');
+
+    // 既に接続処理中の場合はスキップ
+    final currentState = ref.read(webSocketProvider);
+    print('[ScanScreen] Current connection state: ${currentState.connectionState}');
+    if (currentState.connectionState == WsConnectionState.connecting) {
+      print('[ScanScreen] Already connecting, skipping...');
+      return;
+    }
+
     try {
       final info = ConnectionInfo.fromQrData(data);
+      print('[ScanScreen] Parsed connection info, wsUrl=${info.wsUrl}');
+      print('[ScanScreen] Calling connect()...');
       await ref.read(webSocketProvider.notifier).connect(info);
+      print('[ScanScreen] connect() returned');
 
-      // 接続結果を待つ（最大5秒）
-      for (int i = 0; i < 50 && mounted; i++) {
+      // 接続結果を待つ（最大15秒 - デスクトップでの承認時間を考慮）
+      print('[ScanScreen] Waiting for connection result...');
+      final startTime = DateTime.now();
+      for (int i = 0; i < 150 && mounted; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
         final state = ref.read(webSocketProvider);
+        final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+        if (i % 10 == 0) {
+          print('[ScanScreen] Loop $i (${elapsed}ms): connectionState=${state.connectionState}');
+        }
         if (state.connectionState == WsConnectionState.connected) {
+          print('[ScanScreen] Connected! (after ${elapsed}ms) Navigating to commands...');
           context.push('/commands');
           return;
         } else if (state.connectionState == WsConnectionState.error) {
+          print('[ScanScreen] Error (after ${elapsed}ms): ${state.errorMessage}');
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(state.errorMessage ?? l10n.connectionFailed),
               duration: const Duration(seconds: 3),
             ),
           );
-          _isProcessing = false;
+          _restartCameraAfterFailure();
           return;
         } else if (state.connectionState == WsConnectionState.disconnected) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${l10n.connectionFailed}: 接続が切断されました'),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-          _isProcessing = false;
-          return;
+          // connecting状態からdisconnectedに変わった場合のみエラー扱い
+          // （初期状態のdisconnectedは無視）
+          if (i > 0) {
+            print('[ScanScreen] Disconnected (after ${elapsed}ms)');
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('${l10n.connectionFailed}: 接続が切断されました'),
+                duration: const Duration(seconds: 3),
+              ),
+            );
+            _restartCameraAfterFailure();
+            return;
+          }
         }
       }
       // タイムアウト
@@ -108,15 +142,24 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${l10n.connectionFailed}: タイムアウト')),
         );
-        _isProcessing = false;
+        _restartCameraAfterFailure();
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${l10n.connectionFailed}: $e')),
         );
-        _isProcessing = false;
+        _restartCameraAfterFailure();
       }
+    }
+  }
+
+  /// 接続失敗後にカメラを再開
+  void _restartCameraAfterFailure() {
+    _isProcessing = false;
+    if (mounted) {
+      print('[ScanScreen] Restarting camera after failure');
+      cameraController.start();
     }
   }
 
@@ -260,7 +303,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
 
   void _showManualConnectDialog() {
     final l10n = ref.read(l10nProvider);
-    final hostController = TextEditingController(text: '192.168.3.72');
+    final hostController = TextEditingController();
     final portController = TextEditingController(text: '9876');
     final tokenController = TextEditingController();
     bool isExternal = false;
@@ -282,7 +325,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                       child: GestureDetector(
                         onTap: () => setState(() {
                           isExternal = false;
-                          hostController.text = '192.168.3.72';
+                          hostController.text = '';
                           portController.text = '9876';
                         }),
                         child: Container(

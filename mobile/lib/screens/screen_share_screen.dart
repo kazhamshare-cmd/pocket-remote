@@ -46,6 +46,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   Offset _lastFocalPoint = Offset.zero;
   bool _isDragging = false;
   AppWindowInfo? _focusedWindow; // ズーム中のウィンドウ
+  AppWindowInfo? _lastProcessedWindowInfo; // 最後に処理したウィンドウ情報（重複処理防止）
   Offset? _cursorPosition; // カーソル位置（ローカル座標）
   bool _showCursor = false; // カーソル表示フラグ
   bool _mouseMode = true; // マウス操作モード（true: マウス操作、false: 閲覧モード）
@@ -372,11 +373,14 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _startScreenShare() {
+    print('[ScreenShare] _startScreenShare called, _useWebRTC=$_useWebRTC');
     if (_useWebRTC) {
       // WebRTCモード（高速）
+      print('[ScreenShare] Starting WebRTC mode');
       ref.read(webSocketProvider.notifier).startWebRTCScreenShare();
     } else {
       // 従来のWebSocketモード
+      print('[ScreenShare] Starting WebSocket mode');
       ref.read(webSocketProvider.notifier).startScreenShare();
     }
   }
@@ -742,6 +746,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       final pixelCount = window.width * window.height;
 
       // 送信される画像サイズを計算
+      // デスクトップのスケールルール: 300,000px超は1/2サイズで送信
       double sentWidth, sentHeight;
       if (pixelCount > 600000) {
         sentWidth = window.width / 2.0;
@@ -779,14 +784,12 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         remoteY.clamp(0, screenInfo.height.toDouble()),
       );
     } else {
-      // 通常モード: PC画面全体をフルサイズで送信、_viewZoomScale倍で表示
-      // 表示座標 → 送信画像座標 → PC座標
-      // imageX は表示座標（ズーム後）なので、まずズームを解除
-      final sentImageX = imageX / _viewZoomScale;
-      final sentImageY = imageY / _viewZoomScale;
-      // 送信画像はフルサイズなので、そのままPC座標
-      final remoteX = sentImageX;
-      final remoteY = sentImageY;
+      // 通常モード: PC画面全体を表示
+      // 画像は送信サイズからPC画面サイズに引き伸ばされて表示されるため、
+      // 表示座標をそのままPC座標として使用できる
+      // 表示座標 → PC座標（ズームを解除するだけ）
+      final remoteX = imageX / _viewZoomScale;
+      final remoteY = imageY / _viewZoomScale;
 
       return Offset(
         remoteX.clamp(0, screenInfo.width.toDouble()),
@@ -927,6 +930,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   void _resetZoom() {
     setState(() {
       _focusedWindow = null;
+      _lastProcessedWindowInfo = null; // 再選択時に再度処理されるようにリセット
       _imageScrollOffset = Offset.zero; // スクロールもリセット
     });
 
@@ -938,13 +942,58 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(webSocketProvider);
 
-    // 接続が切れたらスナックバーで通知（自動遷移はしない）
-    // ユーザーが戻るボタンを押して自分で戻る
+    // 接続が切れたらPaywallScreenに戻る（サブスク確認後ScanScreenに遷移）
+    if (state.connectionState == WsConnectionState.disconnected ||
+        state.connectionState == WsConnectionState.error) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          // 画面共有を停止
+          _stopScreenShare();
+          // PaywallScreenに戻る
+          context.go('/');
+        }
+      });
+      // 遷移中は空のScaffoldを表示
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFFe94560)),
+        ),
+      );
+    }
+
+    // デスクトップからのwindow_info受信時に自動的に_focusedWindowを更新
+    // これにより、アプリ選択時にモバイル側も正しいウィンドウサイズを認識する
+    if (state.windowInfo != null &&
+        state.windowInfo != _lastProcessedWindowInfo &&
+        state.screenInfo != null) {
+      _lastProcessedWindowInfo = state.windowInfo;
+      // ビルド完了後に状態を更新（ビルド中のsetState呼び出しを避ける）
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && state.windowInfo != null) {
+          final windowInfo = state.windowInfo!;
+          // 小さすぎるウィンドウはスキップ
+          if (windowInfo.width >= 100 && windowInfo.height >= 100) {
+            setState(() {
+              _focusedWindow = windowInfo;
+              _imageScrollOffset = Offset.zero;
+            });
+          }
+        }
+      });
+    }
 
     // ヘッダー用の上部スペース（SafeArea + ヘッダー高さ）
     final topPadding = MediaQuery.of(context).padding.top + 80;
-    // 画面表示エリアの固定高さ
+    // 画面表示エリアの固定高さ（通常モード用）
     const double screenDisplayHeight = 380;
+    // キーボード入力エリアの高さ（概算: Container padding + 入力フィールド + ショートカット行）
+    const double keyboardInputHeight = 130;
+    // PTYモードの動的高さ: 全画面 - 上部 - キーボードエリア - 下部SafeArea
+    final double ptyDisplayHeight = MediaQuery.of(context).size.height
+        - topPadding
+        - keyboardInputHeight
+        - MediaQuery.of(context).padding.bottom;
 
     return PopScope(
       canPop: false, // 画面共有中はシステム戻るボタンでポップしない
@@ -964,13 +1013,13 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         backgroundColor: Colors.black,
         body: Stack(
         children: [
-          // PTYモード: ターミナル出力を表示
+          // PTYモード: ターミナル出力を表示（動的高さ）
           if (_ptyMode)
             Positioned(
               top: topPadding,
               left: 0,
               right: 0,
-              height: screenDisplayHeight,
+              height: ptyDisplayHeight,
               child: Container(
                 color: const Color(0xFF1E1E1E),
                 child: SingleChildScrollView(
@@ -1589,9 +1638,10 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         : state.targetApp ??
             state.runningApps.where((app) => app.isActive).firstOrNull?.name;
 
+    // 上部ヘッダーと同じ高さ（80px）を目安にコンパクトに
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF16213e).withOpacity(0.95),
         borderRadius: BorderRadius.circular(12),
@@ -1605,133 +1655,30 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 送信先表示とモード切り替え
-          Row(
-            children: [
-              const Icon(Icons.send, color: Color(0xFFe94560), size: 14),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  targetAppName ?? l10n.unknownApp,
-                  style: const TextStyle(
-                    color: Color(0xFFe94560),
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              // リアルタイム同期切り替え
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _realtimeSync = !_realtimeSync;
-                    if (!_realtimeSync) {
-                      _lastSentText = '';
-                    }
-                  });
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _realtimeSync
-                        ? Colors.green.withOpacity(0.3)
-                        : Colors.white.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _realtimeSync ? Icons.sync : Icons.sync_disabled,
-                        color: _realtimeSync ? Colors.green : Colors.white54,
-                        size: 14,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        _realtimeSync ? l10n.realtimeMode : l10n.manualMode,
-                        style: TextStyle(
-                          color: _realtimeSync ? Colors.green : Colors.white54,
-                          fontSize: 10,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              // 自動Enter切り替え
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _autoEnter = !_autoEnter;
-                  });
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _autoEnter
-                        ? const Color(0xFFe94560).withOpacity(0.3)
-                        : Colors.white.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.keyboard_return,
-                        color: _autoEnter ? const Color(0xFFe94560) : Colors.white54,
-                        size: 14,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Enter',
-                        style: TextStyle(
-                          color: _autoEnter ? const Color(0xFFe94560) : Colors.white54,
-                          fontSize: 10,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _showKeyboardInput = false;
-                    _textController.clear();
-                    _lastSentText = '';
-                  });
-                },
-                child: const Icon(Icons.close, color: Colors.white54, size: 20),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // 入力フィールドと送信ボタン
+          // 入力フィールドと送信ボタン（上段）
           Row(
             children: [
               Expanded(
                 child: TextField(
                   controller: _textController,
                   focusNode: _textFocusNode,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
                   decoration: InputDecoration(
-                    hintText: _realtimeSync ? '入力するとリアルタイムで反映...' : '入力...',
-                    hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
+                    hintText: _ptyMode ? 'コマンド入力...' : (_realtimeSync ? 'リアルタイム入力...' : '入力...'),
+                    hintStyle: const TextStyle(color: Colors.white38, fontSize: 13),
                     filled: true,
                     fillColor: const Color(0xFF1a1a2e),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    isDense: true,
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(6),
                       borderSide: BorderSide.none,
                     ),
                     focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(6),
                       borderSide: BorderSide(
-                        color: _realtimeSync ? Colors.green : const Color(0xFFe94560),
-                        width: 2,
+                        color: _ptyMode ? Colors.green : (_realtimeSync ? Colors.green : const Color(0xFFe94560)),
+                        width: 1.5,
                       ),
                     ),
                   ),
@@ -1763,7 +1710,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   },
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               // 送信ボタン
               GestureDetector(
                 onTap: () {
@@ -1792,23 +1739,35 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   _textFocusNode.requestFocus();
                 },
                 child: Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
                     color: _ptyMode
                         ? Colors.green
                         : (_realtimeSync ? Colors.green : const Color(0xFFe94560)),
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(6),
                   ),
                   child: Icon(
                     _ptyMode ? Icons.keyboard_return : (_realtimeSync ? Icons.keyboard_return : Icons.send),
                     color: Colors.white,
-                    size: 20,
+                    size: 18,
                   ),
                 ),
               ),
+              // 閉じるボタン
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _showKeyboardInput = false;
+                    _textController.clear();
+                    _lastSentText = '';
+                  });
+                },
+                child: const Icon(Icons.close, color: Colors.white54, size: 20),
+              ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           // ショートカット（横スクロール1行）
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,

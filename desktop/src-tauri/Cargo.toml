@@ -1,6 +1,6 @@
 [package]
 name = "pocket-remote"
-version = "1.5.8"
+version = "1.5.10"
 description = "Remote desktop control from mobile"
 authors = ["you"]
 edition = "2021"
@@ -50,6 +50,7 @@ portable-pty = "0.8"
 # H.264エンコーディング
 openh264 = { version = "0.6", features = ["source"] }
 once_cell = "1.19"
+lazy_static = "1.5"
 
 # macOS アクセシビリティ権限チェック
 [target.'cfg(target_os = "macos")'.dependencies]

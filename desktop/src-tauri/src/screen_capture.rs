@@ -5,9 +5,19 @@ use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use rayon::prelude::*;
 use crate::CaptureRegion;
 use crate::h264_encoder::H264Encoder;
+
+// キーフレーム強制フラグ（新しいクライアントが接続した時に使用）
+static WS_FORCE_KEYFRAME: AtomicBool = AtomicBool::new(false);
+
+/// WebSocketモードでキーフレームを強制リクエスト
+pub fn request_ws_keyframe() {
+    WS_FORCE_KEYFRAME.store(true, Ordering::SeqCst);
+    println!("[xcap-H264] Keyframe requested for new client");
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowInfo {
@@ -48,6 +58,13 @@ impl ScreenCapturer {
 
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    /// 論理解像度を取得（モバイルに送信するサイズ）
+    pub fn get_logical_dimensions(&self) -> (usize, usize) {
+        let logical_w = (self.width as f32 / self.scale_factor) as usize;
+        let logical_h = (self.height as f32 / self.scale_factor) as usize;
+        (logical_w, logical_h)
     }
 
     /// 利用可能なウィンドウ一覧を取得（将来の拡張用）
@@ -118,7 +135,8 @@ impl ScreenCapturer {
                             // キャプチャ領域をチェック（座標はスケール係数で変換）
                             let region = capture_region.read().clone();
 
-                            let final_img = if let Some(r) = region {
+                            // 論理座標でのウィンドウサイズを保持
+                            let (final_img, logical_w, logical_h) = if let Some(r) = region.clone() {
                                 // 領域指定あり: 座標をネイティブ解像度にスケール
                                 let crop_x = ((r.x as f32 * scale_factor) as u32).min(cap_width as u32);
                                 let crop_y = ((r.y as f32 * scale_factor) as u32).min(cap_height as u32);
@@ -126,30 +144,32 @@ impl ScreenCapturer {
                                 let crop_h = ((r.height as f32 * scale_factor) as u32).min(cap_height as u32 - crop_y);
 
                                 if crop_w > 0 && crop_h > 0 {
-                                    dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h)
+                                    // 論理サイズを保持（モバイルとの整合性のため）
+                                    (dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h),
+                                     r.width as f32, r.height as f32)
                                 } else {
-                                    dynamic_img.clone()
+                                    let logical_w = cap_width as f32 / scale_factor;
+                                    let logical_h = cap_height as f32 / scale_factor;
+                                    (dynamic_img.clone(), logical_w, logical_h)
                                 }
                             } else {
-                                dynamic_img.clone()
+                                let logical_w = cap_width as f32 / scale_factor;
+                                let logical_h = cap_height as f32 / scale_factor;
+                                (dynamic_img.clone(), logical_w, logical_h)
                             };
 
-                            // エンコード用サイズ（2の倍数に調整、最大1920x1200程度に制限）
-                            let max_width = 1920u32;
-                            let max_height = 1200u32;
-                            let img_w = final_img.width();
-                            let img_h = final_img.height();
-
-                            // アスペクト比を維持してリサイズ
-                            let (new_width, new_height) = if img_w > max_width || img_h > max_height {
-                                let scale = (max_width as f32 / img_w as f32)
-                                    .min(max_height as f32 / img_h as f32);
-                                let w = ((img_w as f32 * scale) as u32 / 2) * 2;
-                                let h = ((img_h as f32 * scale) as u32 / 2) * 2;
+                            // モバイルと同じロジック: 論理ピクセル数で判定
+                            // 600,000ピクセル以上なら1/2サイズで送信
+                            let logical_pixel_count = (logical_w * logical_h) as u32;
+                            let (new_width, new_height) = if logical_pixel_count > 600000 {
+                                // 1/2サイズで送信（モバイルの期待に合わせる）
+                                let w = ((logical_w / 2.0) as u32 / 2) * 2;  // 2の倍数に
+                                let h = ((logical_h / 2.0) as u32 / 2) * 2;
                                 (w.max(2), h.max(2))
                             } else {
-                                let w = (img_w / 2) * 2;
-                                let h = (img_h / 2) * 2;
+                                // 原寸で送信
+                                let w = (logical_w as u32 / 2) * 2;
+                                let h = (logical_h as u32 / 2) * 2;
                                 (w.max(2), h.max(2))
                             };
 
@@ -186,6 +206,12 @@ impl ScreenCapturer {
 
                             // H.264エンコード
                             if let Some(ref mut encoder) = h264_encoder {
+                                // 新しいクライアント用にキーフレームを強制
+                                if WS_FORCE_KEYFRAME.swap(false, Ordering::SeqCst) {
+                                    println!("[xcap-H264] Forcing keyframe for new client");
+                                    let _ = encoder.force_keyframe();
+                                }
+
                                 match encoder.encode_bgra(&bgra_bytes, new_width, new_height) {
                                     Ok(h264_data) => {
                                         if !h264_data.is_empty() {

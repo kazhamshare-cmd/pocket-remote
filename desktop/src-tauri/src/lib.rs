@@ -20,7 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use screen_capture::ScreenCapturer;
+use screen_capture::{ScreenCapturer, request_ws_keyframe};
 use input_control::{InputController, InputEvent, get_mouse_position};
 use system_control::{SystemController, RunningApp, FileEntry, BrowserTab, TerminalTab, AppWindowInfo, WindowListItem, MessagesChat};
 use webrtc_screen::{WebRTCScreenShare, EncodingMode, set_encoding_mode, get_encoding_mode};
@@ -551,6 +551,8 @@ async fn handle_connection(
                             }
                             Ok(WsMessage::StartScreenShare) if authenticated => {
                                 println!("Starting screen share...");
+                                // 新しいクライアント用にキーフレームを強制リクエスト
+                                request_ws_keyframe();
                                 frame_rx = Some(state.frame_tx.subscribe());
                                 screen_sharing = true;
                                 println!("Screen sharing started");
@@ -723,6 +725,12 @@ async fn handle_connection(
                                         activated
                                     }).await.unwrap_or(false);
                                     println!("[ActivateTab] Done in {:?}, success: {}", start.elapsed(), result);
+
+                                    // タブ切り替え後にキーフレームを強制送信して即座に画面を更新
+                                    if result {
+                                        request_ws_keyframe();
+                                    }
+
                                     let response = WsMessage::ActivateTabResult { success: result };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write_clone.lock().await.send(Message::Text(json.into())).await.ok();
@@ -857,9 +865,15 @@ async fn handle_connection(
                             }
                             Ok(WsMessage::FocusAppWindow { app_name, window_index }) if authenticated => {
                                 println!("FocusAppWindow: {} - window {}", app_name, window_index);
-                                tokio::task::spawn_blocking(move || {
-                                    let success = SystemController::focus_app_window(&app_name, window_index);
+                                tokio::spawn(async move {
+                                    let success = tokio::task::spawn_blocking(move || {
+                                        SystemController::focus_app_window(&app_name, window_index)
+                                    }).await.unwrap_or(false);
                                     println!("FocusAppWindow result: {}", success);
+                                    // ウィンドウ切り替え後にキーフレームを強制送信
+                                    if success {
+                                        request_ws_keyframe();
+                                    }
                                 });
                             }
                             Ok(WsMessage::QuitApp { app_name }) if authenticated => {
@@ -892,11 +906,43 @@ async fn handle_connection(
                             Ok(WsMessage::FocusAndGetWindow { app_name }) if authenticated => {
                                 println!("FocusAndGetWindow: {}", app_name);
                                 let write_clone = write.clone();
+                                let capture_region_clone = Arc::clone(&state.capture_region);
                                 tokio::spawn(async move {
                                     let info = tokio::task::spawn_blocking(move || {
                                         SystemController::focus_and_get_window(&app_name)
                                     }).await.unwrap_or(None);
                                     println!("WindowInfo: {:?}", info);
+
+                                    // 自動的にキャプチャ領域を設定（モバイルからのset_capture_regionを待たない）
+                                    if let Some(ref window_info) = info {
+                                        // 最小サイズチェック（小さすぎる場合は全画面に戻す）
+                                        let min_width = 400;
+                                        let min_height = 300;
+                                        if window_info.width >= min_width && window_info.height >= min_height {
+                                            println!("Auto-setting capture region: {}x{} at ({}, {})",
+                                                window_info.width, window_info.height, window_info.x, window_info.y);
+                                            *capture_region_clone.write() = Some(CaptureRegion {
+                                                x: window_info.x,
+                                                y: window_info.y,
+                                                width: window_info.width,
+                                                height: window_info.height,
+                                                viewport_x: 0,
+                                                viewport_y: 0,
+                                                viewport_width: window_info.width,
+                                                viewport_height: window_info.height,
+                                                quality_mode: "high".to_string(),
+                                            });
+                                        } else {
+                                            println!("Window too small ({}x{}), using full screen capture",
+                                                window_info.width, window_info.height);
+                                            *capture_region_clone.write() = None;
+                                        }
+                                    } else {
+                                        // フォーカスに失敗した場合は全画面キャプチャに戻す
+                                        println!("Focus failed, resetting to full screen capture");
+                                        *capture_region_clone.write() = None;
+                                    }
+
                                     let response = WsMessage::WindowInfo { info };
                                     let json = serde_json::to_string(&response).unwrap();
                                     write_clone.lock().await.send(Message::Text(json.into())).await.ok();
@@ -1084,11 +1130,14 @@ fn start_screen_capture(state: &Arc<AppState>) -> Result<(), String> {
 
     let capturer = ScreenCapturer::new()?;
     let (width, height) = capturer.get_dimensions();
+    let (logical_width, logical_height) = capturer.get_logical_dimensions();
 
-    *state.screen_width.write() = width as u32;
-    *state.screen_height.write() = height as u32;
+    // モバイルに送信するのは論理解像度
+    *state.screen_width.write() = logical_width as u32;
+    *state.screen_height.write() = logical_height as u32;
 
-    println!("[scrap] Screen capture initialized: {}x{}", width, height);
+    println!("[scrap] Screen capture initialized: {}x{} (logical: {}x{})",
+             width, height, logical_width, logical_height);
 
     // キャプチャスレッドを開始（領域指定対応）
     ScreenCapturer::start_capture(width, height, state.frame_tx.clone(), state.capture_region.clone(), state.ws_capture_running.clone());

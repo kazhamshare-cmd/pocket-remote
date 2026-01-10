@@ -1,11 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+// ブラウザタブのキャッシュ（2秒間有効）
+lazy_static::lazy_static! {
+    static ref BROWSER_TABS_CACHE: Mutex<HashMap<String, (Vec<BrowserTab>, Instant)>> = Mutex::new(HashMap::new());
+}
+const BROWSER_TABS_CACHE_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningApp {
@@ -284,6 +293,22 @@ impl SystemController {
     /// アプリをフォーカス（アクティブに）- macOS版
     #[cfg(target_os = "macos")]
     pub fn focus_app(app_name: &str) -> bool {
+        // 一般的なアプリ名のマッピング（プロセス名とアプリ名が異なる場合）
+        let normalized_name = match app_name.to_lowercase().as_str() {
+            "chrome" => "Google Chrome",
+            "safari" => "Safari",
+            "firefox" => "Firefox",
+            "edge" => "Microsoft Edge",
+            "vscode" | "code" => "Visual Studio Code",
+            "terminal" => "Terminal",
+            "finder" => "Finder",
+            "slack" => "Slack",
+            "discord" => "Discord",
+            "zoom" => "zoom.us",
+            _ => app_name,
+        };
+        println!("[focus_app] Normalizing '{}' → '{}'", app_name, normalized_name);
+
         // まずbundle identifierを取得してからアクティベート
         // プロセス名とアプリ名が異なる場合（例: AdobeAcrobat → Adobe Acrobat DC）に対応
         let script = format!(
@@ -307,8 +332,8 @@ impl SystemController {
                 end tell
             end timeout
             "#,
-            app_name.replace("\"", "\\\""),
-            app_name.replace("\"", "\\\"")
+            normalized_name.replace("\"", "\\\""),
+            normalized_name.replace("\"", "\\\"")
         );
 
         let output = Command::new("osascript")
@@ -363,6 +388,7 @@ impl SystemController {
     }
 
     /// アプリのウィンドウ一覧を取得 - macOS版
+    /// ウィンドウがない場合はアプリをアクティベートして新しいウィンドウを開く
     #[cfg(target_os = "macos")]
     pub fn get_app_windows(app_name: &str) -> Vec<WindowListItem> {
         let escaped_name = app_name.replace("\"", "\\\"");
@@ -401,37 +427,114 @@ impl SystemController {
             .arg(&script)
             .output();
 
-        match output {
+        let mut windows: Vec<WindowListItem> = match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 if stdout.is_empty() {
-                    return Vec::new();
+                    Vec::new()
+                } else {
+                    stdout
+                        .split("|||")
+                        .filter_map(|entry| {
+                            let parts: Vec<&str> = entry.splitn(3, ":::").collect();
+                            if parts.len() >= 2 {
+                                let index = parts[0].parse::<usize>().unwrap_or(1);
+                                let title = parts[1].to_string();
+                                let is_minimized = parts.get(2).map(|s| *s == "true").unwrap_or(false);
+                                Some(WindowListItem {
+                                    index,
+                                    title,
+                                    is_minimized,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
                 }
-
-                stdout
-                    .split("|||")
-                    .filter_map(|entry| {
-                        let parts: Vec<&str> = entry.splitn(3, ":::").collect();
-                        if parts.len() >= 2 {
-                            let index = parts[0].parse::<usize>().unwrap_or(1);
-                            let title = parts[1].to_string();
-                            let is_minimized = parts.get(2).map(|s| *s == "true").unwrap_or(false);
-                            Some(WindowListItem {
-                                index,
-                                title,
-                                is_minimized,
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
             }
             Err(e) => {
                 eprintln!("Failed to get windows for {}: {}", app_name, e);
                 Vec::new()
             }
+        };
+
+        // ウィンドウがない場合、アプリをアクティベートして新しいウィンドウを開く
+        if windows.is_empty() {
+            println!("[get_app_windows] No windows found for '{}', attempting to activate app", app_name);
+
+            // アプリをアクティベート
+            Self::focus_app(app_name);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            // 再度ウィンドウを取得
+            let retry_output = Command::new("osascript")
+                .arg("-e")
+                .arg(&format!(
+                    r#"
+                    tell application "System Events"
+                        tell process "{}"
+                            set windowList to {{}}
+                            set windowCount to count of windows
+                            repeat with i from 1 to windowCount
+                                set w to window i
+                                set wTitle to ""
+                                set wMinimized to false
+                                try
+                                    set wTitle to name of w
+                                end try
+                                try
+                                    set wMinimized to value of attribute "AXMinimized" of w
+                                end try
+                                set end of windowList to (i as text) & ":::" & wTitle & ":::" & (wMinimized as text)
+                            end repeat
+                            set AppleScript's text item delimiters to "|||"
+                            set windowListText to windowList as text
+                            set AppleScript's text item delimiters to ""
+                            return windowListText
+                        end tell
+                    end tell
+                    "#,
+                    escaped_name
+                ))
+                .output();
+
+            if let Ok(o) = retry_output {
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !stdout.is_empty() {
+                    windows = stdout
+                        .split("|||")
+                        .filter_map(|entry| {
+                            let parts: Vec<&str> = entry.splitn(3, ":::").collect();
+                            if parts.len() >= 2 {
+                                let index = parts[0].parse::<usize>().unwrap_or(1);
+                                let title = parts[1].to_string();
+                                let is_minimized = parts.get(2).map(|s| *s == "true").unwrap_or(false);
+                                Some(WindowListItem {
+                                    index,
+                                    title,
+                                    is_minimized,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                }
+            }
+
+            // それでもウィンドウがない場合、デフォルトエントリを追加
+            if windows.is_empty() {
+                println!("[get_app_windows] Still no windows after activation, adding default entry");
+                windows.push(WindowListItem {
+                    index: 1,
+                    title: format!("{} (アプリを開く)", app_name),
+                    is_minimized: false,
+                });
+            }
         }
+
+        windows
     }
 
     /// アプリのウィンドウ一覧を取得 - Windows版
@@ -801,6 +904,18 @@ impl SystemController {
     /// Safari/Chromeのタブ一覧を取得 - macOS版
     #[cfg(target_os = "macos")]
     pub fn get_browser_tabs(app_name: &str) -> Vec<BrowserTab> {
+        // キャッシュをチェック
+        let cache_key = app_name.to_lowercase();
+        {
+            let cache = BROWSER_TABS_CACHE.lock().unwrap();
+            if let Some((tabs, timestamp)) = cache.get(&cache_key) {
+                if timestamp.elapsed() < BROWSER_TABS_CACHE_DURATION {
+                    println!("[get_browser_tabs] Using cached tabs for {} ({} tabs)", app_name, tabs.len());
+                    return tabs.clone();
+                }
+            }
+        }
+
         let script = if app_name.to_lowercase().contains("safari") {
             r#"
             tell application "Safari"
@@ -851,7 +966,15 @@ impl SystemController {
                 if !stderr.is_empty() {
                     println!("[get_browser_tabs] stderr: {}", stderr);
                 }
-                parse_browser_tabs(&stdout)
+                let tabs = parse_browser_tabs(&stdout);
+
+                // キャッシュを更新
+                {
+                    let mut cache = BROWSER_TABS_CACHE.lock().unwrap();
+                    cache.insert(cache_key, (tabs.clone(), Instant::now()));
+                }
+
+                tabs
             }
             Err(e) => {
                 eprintln!("[get_browser_tabs] Failed: {}", e);
@@ -1886,9 +2009,9 @@ impl SystemController {
                         set winPos to position of frontWindow
                         set winSize to size of frontWindow
 
-                        return appName & "|" & winName & "|" & (item 1 of winPos) & "|" & (item 2 of winPos) & "|" & (item 1 of winSize) & "|" & (item 2 of winSize)
+                        return appName & "|||" & winName & "|||" & (item 1 of winPos) & "|||" & (item 2 of winPos) & "|||" & (item 1 of winSize) & "|||" & (item 2 of winSize)
                     on error errMsg
-                        return appName & "|No Window|0|0|0|0"
+                        return appName & "|||No Window|||0|||0|||0|||0"
                     end try
                 end tell
             end timeout
@@ -1908,7 +2031,7 @@ impl SystemController {
                     eprintln!("[get_frontmost_window] stderr: {}", stderr);
                 }
 
-                let parts: Vec<&str> = stdout.trim().split('|').collect();
+                let parts: Vec<&str> = stdout.trim().split("|||").collect();
 
                 if parts.len() >= 6 {
                     let width = parts[4].parse().unwrap_or(0);
@@ -1920,11 +2043,15 @@ impl SystemController {
                         return None;
                     }
 
+                    // x, yが負の場合は0にクランプ（一部アプリで負の座標が返る問題を回避）
+                    let x: i32 = parts[2].parse().unwrap_or(0).max(0);
+                    let y: i32 = parts[3].parse().unwrap_or(0).max(0);
+
                     Some(AppWindowInfo {
                         app_name: parts[0].to_string(),
                         window_title: parts[1].to_string(),
-                        x: parts[2].parse().unwrap_or(0),
-                        y: parts[3].parse().unwrap_or(0),
+                        x,
+                        y,
                         width,
                         height,
                     })
@@ -2013,37 +2140,81 @@ impl SystemController {
     pub fn focus_and_get_window(app_name: &str) -> Option<AppWindowInfo> {
         println!("[SystemControl] focus_and_get_window: Getting window info for '{}'", app_name);
 
-        // focusAppWindowで既にフォーカス済みかを確認するが、
-        // 念のため常にfocus_appを呼んでアプリを最前面に
+        // アプリを最前面に
         println!("[SystemControl] Calling focus_app for '{}'", app_name);
         Self::focus_app(app_name);
-        std::thread::sleep(std::time::Duration::from_millis(300));
 
-        // ウィンドウを左上に移動（座標計算を簡単にするため）
-        Self::move_window_to_top_left(None, None);
+        // アプリが最前面になるまでリトライ（最大5回、各200ms待機）
+        let target_app_lower = app_name.to_lowercase();
+        let mut window_info: Option<AppWindowInfo> = None;
 
-        // 移動後に少し待機してからウィンドウ情報を取得
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        for attempt in 1..=5 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let window_info = Self::get_frontmost_window();
+            // ウィンドウを左上に移動（アプリ名を指定してより確実に）
+            Self::move_window_to_top_left_for_app(Some(app_name), None, None);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            let info = Self::get_frontmost_window();
+
+            if let Some(ref wi) = info {
+                let info_app_lower = wi.app_name.to_lowercase();
+                if info_app_lower.contains(&target_app_lower) || target_app_lower.contains(&info_app_lower) {
+                    // ウィンドウが左上付近にあるか確認（許容誤差: x <= 10, y <= 50）
+                    let is_positioned = wi.x <= 10 && wi.y <= 50;
+                    if is_positioned {
+                        println!("[SystemControl] App matched and positioned on attempt {}: '{}' at ({}, {})",
+                            attempt, wi.app_name, wi.x, wi.y);
+                        window_info = info;
+                        break;
+                    } else if attempt < 5 {
+                        // まだ左上に移動していない場合、再試行
+                        println!("[SystemControl] App matched but not positioned: '{}' at ({}, {}). Retrying move...",
+                            wi.app_name, wi.x, wi.y);
+                        Self::move_window_to_top_left_for_app(Some(app_name), None, None);
+                    } else {
+                        // 最終試行でも移動しなかった場合、現在位置で続行
+                        println!("[SystemControl] App matched on final attempt {}: '{}' at ({}, {}) - position may not be top-left",
+                            attempt, wi.app_name, wi.x, wi.y);
+                        window_info = info;
+                        break;
+                    }
+                } else {
+                    println!("[SystemControl] Attempt {}: frontmost='{}', target='{}'. Retrying...",
+                        attempt, wi.app_name, app_name);
+                    // 再度フォーカスを試みる
+                    Self::focus_app(app_name);
+                }
+            }
+        }
+
+        // ターゲットアプリがフォーカスできなかった場合
+        if window_info.is_none() {
+            println!("[SystemControl] Failed to focus target app '{}' after retries", app_name);
+            // 最後に一度だけ現在の最前面を確認
+            if let Some(info) = Self::get_frontmost_window() {
+                let info_app_lower = info.app_name.to_lowercase();
+                if info_app_lower.contains(&target_app_lower) || target_app_lower.contains(&info_app_lower) {
+                    println!("[SystemControl] Target app found on final check: '{}'", info.app_name);
+                    window_info = Some(info);
+                } else {
+                    // 間違ったアプリが最前面の場合はNoneを返す
+                    println!("[SystemControl] Wrong app frontmost: '{}', expected '{}'. Returning None.",
+                        info.app_name, app_name);
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
 
         // ウィンドウの中央をクリックしてカーソルをアクティブ化
-        // ただし、指定したアプリのウィンドウである場合のみ
         if let Some(ref info) = window_info {
-            // アプリ名が一致するか確認（大文字小文字を無視して部分一致）
-            let info_app_lower = info.app_name.to_lowercase();
-            let target_app_lower = app_name.to_lowercase();
-
-            if info_app_lower.contains(&target_app_lower) || target_app_lower.contains(&info_app_lower) {
-                let center_x = info.x + (info.width / 2);
-                let center_y = info.y + (info.height / 2);
-                println!("[SystemControl] App matched: '{}' == '{}'. Window at ({}, {}), clicking center ({}, {})",
-                    info.app_name, app_name, info.x, info.y, center_x, center_y);
-                Self::click_at(center_x as f64, center_y as f64);
-            } else {
-                println!("[SystemControl] App mismatch: frontmost='{}', target='{}'. Skipping click.",
-                    info.app_name, app_name);
-            }
+            let center_x = info.x + (info.width / 2);
+            let center_y = info.y + (info.height / 2);
+            println!("[SystemControl] Window at ({}, {}), clicking center ({}, {})",
+                info.x, info.y, center_x, center_y);
+            Self::click_at(center_x as f64, center_y as f64);
         }
 
         window_info
@@ -2093,15 +2264,16 @@ impl SystemController {
         // Windows/Linux版は未実装
     }
 
-    /// フォーカス中のウィンドウを左上(0,0)に移動し、指定サイズに変更 - macOS版
+    /// フォーカス中のウィンドウを左上(0,25)に移動し、指定サイズに変更 - macOS版
+    /// app_name: 対象アプリ名（指定するとより確実に移動できる）
+    /// 最小化されている場合は自動的に最小化解除してから移動する
     #[cfg(target_os = "macos")]
-    pub fn move_window_to_top_left(width: Option<i32>, height: Option<i32>) -> bool {
+    pub fn move_window_to_top_left_for_app(app_name: Option<&str>, width: Option<i32>, height: Option<i32>) -> bool {
         // ウィンドウを(0, 25)に移動（25はメニューバーの高さ）
-        // サイズが指定されていれば変更
         let size_script = if let (Some(w), Some(h)) = (width, height) {
             format!(
                 r#"
-                    set size of frontWindow to {{{}, {}}}
+                    set size of targetWindow to {{{}, {}}}
                 "#,
                 w, h
             )
@@ -2109,22 +2281,80 @@ impl SystemController {
             String::new()
         };
 
-        let script = format!(
-            r#"
-            tell application "System Events"
-                set frontApp to first application process whose frontmost is true
-                try
-                    set frontWindow to first window of frontApp
-                    set position of frontWindow to {{0, 25}}
-                    {}
-                    return "success"
-                on error errMsg
-                    return "error: " & errMsg
-                end try
-            end tell
-            "#,
-            size_script
-        );
+        // アプリ名が指定されている場合は、そのアプリのウィンドウを直接操作
+        let script = if let Some(name) = app_name {
+            let escaped_name = name.replace("\"", "\\\"");
+            format!(
+                r#"
+                tell application "System Events"
+                    tell process "{}"
+                        try
+                            -- 最初のウィンドウを取得
+                            if (count of windows) = 0 then
+                                return "error: no windows"
+                            end if
+                            set targetWindow to first window
+
+                            -- 最小化されている場合は解除
+                            try
+                                set isMin to value of attribute "AXMinimized" of targetWindow
+                                if isMin is true then
+                                    set value of attribute "AXMinimized" of targetWindow to false
+                                    delay 0.3
+                                end if
+                            end try
+
+                            -- ウィンドウを最前面に上げる
+                            try
+                                perform action "AXRaise" of targetWindow
+                            end try
+
+                            -- 位置を設定
+                            set position of targetWindow to {{0, 25}}
+                            {}
+                            return "success"
+                        on error errMsg
+                            return "error: " & errMsg
+                        end try
+                    end tell
+                end tell
+                "#,
+                escaped_name, size_script
+            )
+        } else {
+            // アプリ名が指定されていない場合は従来通り
+            format!(
+                r#"
+                tell application "System Events"
+                    set frontApp to first application process whose frontmost is true
+                    try
+                        set targetWindow to first window of frontApp
+
+                        -- 最小化されている場合は解除
+                        try
+                            set isMin to value of attribute "AXMinimized" of targetWindow
+                            if isMin is true then
+                                set value of attribute "AXMinimized" of targetWindow to false
+                                delay 0.3
+                            end if
+                        end try
+
+                        -- ウィンドウを最前面に上げる
+                        try
+                            perform action "AXRaise" of targetWindow
+                        end try
+
+                        set position of targetWindow to {{0, 25}}
+                        {}
+                        return "success"
+                    on error errMsg
+                        return "error: " & errMsg
+                    end try
+                end tell
+                "#,
+                size_script
+            )
+        };
 
         match Command::new("osascript")
             .args(["-e", &script])
@@ -2133,14 +2363,20 @@ impl SystemController {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let success = stdout.trim().starts_with("success");
-                println!("[SystemControl] move_window_to_top_left: {}", stdout.trim());
+                println!("[SystemControl] move_window_to_top_left_for_app({:?}): {}", app_name, stdout.trim());
                 success
             }
             Err(e) => {
-                println!("[SystemControl] move_window_to_top_left error: {}", e);
+                println!("[SystemControl] move_window_to_top_left_for_app error: {}", e);
                 false
             }
         }
+    }
+
+    /// フォーカス中のウィンドウを左上(0,25)に移動し、指定サイズに変更 - macOS版（互換用）
+    #[cfg(target_os = "macos")]
+    pub fn move_window_to_top_left(width: Option<i32>, height: Option<i32>) -> bool {
+        Self::move_window_to_top_left_for_app(None, width, height)
     }
 
     #[cfg(not(target_os = "macos"))]

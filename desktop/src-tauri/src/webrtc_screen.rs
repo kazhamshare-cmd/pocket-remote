@@ -415,18 +415,33 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
         return None;
     }
 
-    // ウィンドウ領域をそのままクロップ（シンプル化）
-    let (crop_x, crop_y, crop_w, crop_h) = match &region {
-        Some(r) => {
-            // ウィンドウ座標をクロップ
-            let x = (r.x as usize).min(width.saturating_sub(1));
-            let y = (r.y as usize).min(height.saturating_sub(1));
-            let w = (r.width as usize).min(width.saturating_sub(x));
-            let h = (r.height as usize).min(height.saturating_sub(y));
+    // Retinaディスプレイ対応: スケールファクターを検出
+    // キャプチャはネイティブ解像度、CaptureRegionは論理座標（AppleScriptから）
+    let display_scale = if let Some(r) = &region {
+        if r.height > 0 {
+            // キャプチャ高さと領域高さの比率からスケールを推定
+            let ratio = height as f64 / (r.height as f64 + r.y as f64);
+            if ratio > 1.5 { 2usize } else { 1usize }
+        } else { 1usize }
+    } else { 1usize };
 
-            (x, y, w, h)
+    if should_log {
+        println!("[WebRTC] Display scale: {}x, capture: {}x{}, region: {:?}",
+            display_scale, width, height, region);
+    }
+
+    // ウィンドウ領域をネイティブ座標でクロップ
+    let (crop_x, crop_y, crop_w, crop_h, logical_w, logical_h) = match &region {
+        Some(r) => {
+            // 論理座標をネイティブ座標に変換してクロップ
+            let x = ((r.x as usize) * display_scale).min(width.saturating_sub(1));
+            let y = ((r.y as usize) * display_scale).min(height.saturating_sub(1));
+            let w = ((r.width as usize) * display_scale).min(width.saturating_sub(x));
+            let h = ((r.height as usize) * display_scale).min(height.saturating_sub(y));
+
+            (x, y, w, h, r.width as usize, r.height as usize)
         }
-        None => (0, 0, width, height),
+        None => (0, 0, width, height, width / display_scale, height / display_scale),
     };
 
     // 常に高画質モード（シンプル化）
@@ -477,49 +492,50 @@ fn encode_frame(bgra: &[u8], width: usize, height: usize, region: Option<Capture
 
     let dynamic_img = DynamicImage::ImageRgba8(img);
 
-    // ウィンドウサイズに応じてスケールを決定（64KB制限内で高速化）
-    let pixel_count = crop_w * crop_h;
-    let (scale, start_quality) = if pixel_count <= 150000 {
-        // ~400x375以下 → フルサイズ、高品質
-        if should_log {
-            println!("[WebRTC] XSmall window {}x{} ({}px) → full size, 80% quality", crop_w, crop_h, pixel_count);
-        }
-        (1, 80u8)
-    } else if pixel_count <= 300000 {
-        // ~600x500以下 → フルサイズ、中品質
-        if should_log {
-            println!("[WebRTC] Small window {}x{} ({}px) → full size, 65% quality", crop_w, crop_h, pixel_count);
-        }
-        (1, 65u8)
-    } else if pixel_count <= 600000 {
-        // ~800x750以下 → 1/2サイズ
-        if should_log {
-            println!("[WebRTC] Medium window {}x{} ({}px) → 1/2 size, 70% quality", crop_w, crop_h, pixel_count);
-        }
-        (2, 70u8)
-    } else {
-        // 600,000px以上 → 1/2サイズ
-        if should_log {
-            println!("[WebRTC] Large window {}x{} ({}px) → 1/2 size, 65% quality", crop_w, crop_h, pixel_count);
-        }
-        (2, 65u8)
-    };
+    // モバイルと同じロジック: 論理ピクセル数で判定（H264と統一）
+    // 600,000ピクセル以上なら1/2サイズで送信
+    let logical_pixel_count = (logical_w * logical_h) as u32;
 
-    let new_width = (crop_w / scale) as u32;
-    let new_height = (crop_h / scale) as u32;
+    // デバッグ: 常に最初の5フレームでサイズ情報を出力
     if should_log {
-        println!("[WebRTC] Sending frame: crop={}x{}, scale=1/{}, final={}x{}", crop_w, crop_h, scale, new_width, new_height);
+        println!("[WebRTC/JPEG] DEBUG: crop={}x{}, logical={}x{}, display_scale={}, region={:?}",
+            crop_w, crop_h, logical_w, logical_h, display_scale, region);
     }
-    let resize_start = std::time::Instant::now();
-    let final_img = if scale == 1 {
-        dynamic_img
+
+    let (new_width, new_height, start_quality) = if logical_pixel_count <= 300000 {
+        // 小さいウィンドウ → 原寸、高品質
+        let w = (logical_w as u32 / 2) * 2;  // 偶数に
+        let h = (logical_h as u32 / 2) * 2;
+        if should_log {
+            println!("[WebRTC/JPEG] Small window: logical={}x{} ({}px) → original scale → {}x{}",
+                logical_w, logical_h, logical_pixel_count, w, h);
+        }
+        (w.max(2), h.max(2), 75u8)
+    } else if logical_pixel_count <= 600000 {
+        // 中程度のウィンドウ → 原寸、中品質
+        let w = (logical_w as u32 / 2) * 2;
+        let h = (logical_h as u32 / 2) * 2;
+        if should_log {
+            println!("[WebRTC/JPEG] Medium window: logical={}x{} ({}px) → original scale → {}x{}",
+                logical_w, logical_h, logical_pixel_count, w, h);
+        }
+        (w.max(2), h.max(2), 65u8)
     } else {
-        dynamic_img.resize_exact(
-            new_width.max(1),
-            new_height.max(1),
-            image::imageops::FilterType::Nearest,  // 高速リサイズ
-        )
+        // 大きいウィンドウ → 1/2サイズ
+        let w = ((logical_w / 2) as u32 / 2) * 2;  // 偶数に
+        let h = ((logical_h / 2) as u32 / 2) * 2;
+        if should_log {
+            println!("[WebRTC/JPEG] Large window: logical={}x{} ({}px) → 1/2 scale → {}x{}",
+                logical_w, logical_h, logical_pixel_count, w, h);
+        }
+        (w.max(2), h.max(2), 60u8)
     };
+    let resize_start = std::time::Instant::now();
+    let final_img = dynamic_img.resize_exact(
+        new_width.max(1),
+        new_height.max(1),
+        image::imageops::FilterType::Nearest,  // 高速リサイズ
+    );
     let resize_time = resize_start.elapsed();
 
     let jpeg_start = std::time::Instant::now();
@@ -680,16 +696,37 @@ pub fn encode_frame_auto(
         EncodingMode::H264 => {
             let should_log = frame_count < 5;
 
-            // クロップしてBGRAデータを抽出
-            let (crop_x, crop_y, crop_w, crop_h) = match &region {
+            // Retinaディスプレイ対応: スケールファクターを検出
+            // CaptureRegionは論理座標（AppleScriptから）、キャプチャはネイティブ解像度
+            let display_scale = if let Some(r) = &region {
+                if r.height > 0 {
+                    // キャプチャ高さと領域高さ+Yオフセットの比率からスケールを推定
+                    let ratio = height as f64 / (r.height as f64 + r.y as f64);
+                    if ratio > 1.5 { 2usize } else { 1usize }
+                } else { 1usize }
+            } else { 1usize };
+
+            if should_log {
+                println!("[H264] Display scale: {}x, capture: {}x{}, region: {:?}",
+                    display_scale, width, height, region);
+            }
+
+            // クロップしてBGRAデータを抽出（論理座標をネイティブ座標に変換）
+            let (crop_x, crop_y, crop_w, crop_h, logical_w, logical_h) = match &region {
                 Some(r) => {
-                    let x = (r.x as usize).min(width.saturating_sub(1));
-                    let y = (r.y as usize).min(height.saturating_sub(1));
-                    let w = (r.width as usize).min(width.saturating_sub(x));
-                    let h = (r.height as usize).min(height.saturating_sub(y));
-                    (x, y, w, h)
+                    // 論理座標をネイティブ座標に変換
+                    let x = ((r.x as usize) * display_scale).min(width.saturating_sub(1));
+                    let y = ((r.y as usize) * display_scale).min(height.saturating_sub(1));
+                    let w = ((r.width as usize) * display_scale).min(width.saturating_sub(x));
+                    let h = ((r.height as usize) * display_scale).min(height.saturating_sub(y));
+                    // 論理サイズ（モバイルが期待するサイズ）
+                    (x, y, w, h, r.width as f32, r.height as f32)
                 }
-                None => (0, 0, width, height),
+                None => {
+                    let logical_w = width as f32 / display_scale as f32;
+                    let logical_h = height as f32 / display_scale as f32;
+                    (0, 0, width, height, logical_w, logical_h)
+                }
             };
 
             if crop_w == 0 || crop_h == 0 {
@@ -717,7 +754,7 @@ pub fn encode_frame_auto(
                 }
             }
 
-            // 画像を作成してリサイズ（H.264でも解像度を下げてフレームサイズを小さく）
+            // 画像を作成してリサイズ
             let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
                 crop_w as u32,
                 crop_h as u32,
@@ -726,16 +763,29 @@ pub fn encode_frame_auto(
 
             let dynamic_img = DynamicImage::ImageRgba8(img);
 
-            // 固定1/4スケール（キーフレーム15KB以下を保証）
-            let new_width = ((crop_w / 4) as u32).max(2);
-            let new_height = ((crop_h / 4) as u32).max(2);
-            // 2の倍数に調整（YUV420要件）
-            let new_width = (new_width / 2) * 2;
-            let new_height = (new_height / 2) * 2;
+            // モバイルと同じロジック: 論理ピクセル数で判定
+            // 600,000ピクセル以上なら1/2サイズで送信（モバイルの期待に合わせる）
+            let logical_pixel_count = (logical_w * logical_h) as u32;
+            let (new_width, new_height) = if logical_pixel_count > 600000 {
+                // 1/2サイズで送信
+                let w = ((logical_w / 2.0) as u32 / 2) * 2;  // 2の倍数に（YUV420要件）
+                let h = ((logical_h / 2.0) as u32 / 2) * 2;
+                (w.max(2), h.max(2))
+            } else {
+                // 原寸で送信
+                let w = (logical_w as u32 / 2) * 2;
+                let h = (logical_h as u32 / 2) * 2;
+                (w.max(2), h.max(2))
+            };
 
             if should_log {
-                println!("[H264] Window {}x{} → 1/4 scale → {}x{}",
-                    crop_w, crop_h, new_width, new_height);
+                if logical_pixel_count > 600000 {
+                    println!("[H264] Large window: logical={}x{} ({}px) → 1/2 scale → {}x{}",
+                        logical_w as i32, logical_h as i32, logical_pixel_count, new_width, new_height);
+                } else {
+                    println!("[H264] Small window: logical={}x{} ({}px) → original scale → {}x{}",
+                        logical_w as i32, logical_h as i32, logical_pixel_count, new_width, new_height);
+                }
             }
 
             let final_img = dynamic_img.resize_exact(
