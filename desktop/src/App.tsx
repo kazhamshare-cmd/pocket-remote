@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { AppLanguage, languages, getTranslations, loadLanguage, saveLanguage } from "./i18n";
 
 interface ConnectionInfo {
   ip: string;
@@ -29,17 +30,16 @@ interface ConnectionRequest {
   ip_address: string;
 }
 
-// 通知音を鳴らす関数（優しいチャイム音）
+// Play notification sound (gentle chime)
 function playNotificationSound() {
   try {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
 
-    // 優しいチャイム音（1回だけ）
     const osc = audioContext.createOscillator();
     const gain = audioContext.createGain();
     osc.connect(gain);
     gain.connect(audioContext.destination);
-    osc.frequency.value = 523.25; // C5（ド）- 優しい音程
+    osc.frequency.value = 523.25; // C5
     osc.type = 'sine';
     gain.gain.setValueAtTime(0.3, audioContext.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
@@ -53,13 +53,18 @@ function playNotificationSound() {
 }
 
 function App() {
+  // Language state
+  const [language, setLanguage] = useState<AppLanguage>(loadLanguage());
+  const [showLanguageMenu, setShowLanguageMenu] = useState(false);
+  const t = getTranslations(language);
+
   const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
   const [connected, setConnected] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
   const [accessibilityGranted, setAccessibilityGranted] = useState<boolean | null>(null);
   const [checkingPermission, setCheckingPermission] = useState(true);
 
-  // トンネル関連
+  // Tunnel
   const [cloudflaredStatus, setCloudflaredStatus] = useState<CloudflaredStatus | null>(null);
   const [tunnelInfo, setTunnelInfo] = useState<TunnelInfo | null>(null);
   const [tunnelStarting, setTunnelStarting] = useState(false);
@@ -67,17 +72,23 @@ function App() {
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState<string | null>(null);
 
-  // 接続リクエスト（承認待ち）
+  // Connection request
   const [pendingRequest, setPendingRequest] = useState<ConnectionRequest | null>(null);
-  // 音を鳴らした最後のリクエストIDを記録（重複防止）
   const lastSoundRequestId = useRef<string | null>(null);
 
-  // アップデート関連
+  // Update
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; notes?: string } | null>(null);
   const [updateDownloading, setUpdateDownloading] = useState(false);
 
+  // Handle language change
+  const handleLanguageChange = (lang: AppLanguage) => {
+    setLanguage(lang);
+    saveLanguage(lang);
+    setShowLanguageMenu(false);
+  };
+
   useEffect(() => {
-    // アップデートをチェック
+    // Check for updates
     const checkForUpdates = async () => {
       try {
         console.log("[Updater] Checking for updates...");
@@ -97,22 +108,21 @@ function App() {
     };
     checkForUpdates();
 
-    // アクセシビリティ権限をチェック（プロンプトは表示しない）
+    // Check accessibility permission
     const checkPermissions = async () => {
       try {
         const granted = await invoke<boolean>("check_accessibility");
         setAccessibilityGranted(granted);
-        // 自動でプロンプトを表示しない（ユーザーが手動で設定する）
       } catch (e) {
         console.error("Failed to check accessibility:", e);
-        setAccessibilityGranted(true); // エラー時はスキップ
+        setAccessibilityGranted(true);
       } finally {
         setCheckingPermission(false);
       }
     };
     checkPermissions();
 
-    // cloudflaredがインストールされているかチェック
+    // Check cloudflared status
     const checkCloudflared = async () => {
       try {
         const status = await invoke<CloudflaredStatus>("get_cloudflared_status");
@@ -124,7 +134,7 @@ function App() {
     };
     checkCloudflared();
 
-    // トンネル開始イベントをリッスン
+    // Listen for tunnel started event
     const unlistenTunnel = listen<TunnelInfo>("tunnel_started", (event) => {
       console.log("Tunnel started:", event.payload);
       setTunnelInfo(event.payload);
@@ -132,19 +142,18 @@ function App() {
       setShowExternalQR(true);
     });
 
-    // インストール進捗をリッスン
+    // Listen for install progress
     const unlistenProgress = listen<string>("cloudflared_install_progress", (event) => {
       console.log("Install progress:", event.payload);
       setInstallProgress(event.payload);
     });
 
-    // 接続リクエストをリッスン
+    // Listen for connection requests
     const unlistenConnectionRequest = listen<ConnectionRequest>("connection_request", (event) => {
       console.log("===== CONNECTION REQUEST RECEIVED =====");
       console.log("Event payload:", event.payload);
       console.log("Setting pendingRequest...");
       setPendingRequest(event.payload);
-      // 通知音を1回だけ鳴らす（同じリクエストで複数回鳴らさない）
       if (lastSoundRequestId.current !== event.payload.request_id) {
         lastSoundRequestId.current = event.payload.request_id;
         playNotificationSound();
@@ -159,14 +168,12 @@ function App() {
     };
   }, []);
 
-  // 接続状態の監視
+  // Monitor connection state
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        // 接続情報を常に最新に保つ（バックエンド再起動時にトークンが変わるため）
         const info = await invoke<ConnectionInfo | null>("get_connection_info");
         if (info) {
-          // トークンが変わった場合のみ更新
           if (!connectionInfo || connectionInfo.auth_token !== info.auth_token) {
             console.log("[App] Connection info updated, new token:", info.auth_token);
             setConnectionInfo(info);
@@ -177,7 +184,6 @@ function App() {
         setConnected(status.connected);
         setConnectedDevice(status.device);
 
-        // アクセシビリティ権限を定期的に再チェック
         if (!accessibilityGranted) {
           const granted = await invoke<boolean>("check_accessibility");
           if (granted) {
@@ -185,7 +191,6 @@ function App() {
           }
         }
 
-        // トンネル情報をポーリングで取得（イベントが届かない場合のフォールバック）
         if (tunnelStarting && !tunnelInfo) {
           const info = await invoke<TunnelInfo | null>("get_tunnel_info");
           if (info) {
@@ -196,17 +201,15 @@ function App() {
           }
         }
 
-        // 保留中の接続リクエストをポーリングで取得（バックアップ用）
         const request = await invoke<ConnectionRequest | null>("get_pending_request");
         if (request && !pendingRequest) {
           console.log("Pending request found via polling:", request);
           setPendingRequest(request);
-          // 音はイベントリスナーで鳴らすのでここでは鳴らさない
         }
       } catch (e) {
         console.error(e);
       }
-    }, 500); // 500msでポーリング（より素早く検出）
+    }, 500);
 
     return () => clearInterval(interval);
   }, [accessibilityGranted, connectionInfo, tunnelStarting, tunnelInfo]);
@@ -242,10 +245,9 @@ function App() {
 
   const handleInstallCloudflared = async () => {
     setInstalling(true);
-    setInstallProgress("Preparing...");
+    setInstallProgress(t.installing);
     try {
       await invoke("install_cloudflared");
-      // インストール完了後、ステータスを再チェック
       const status = await invoke<CloudflaredStatus>("get_cloudflared_status");
       setCloudflaredStatus(status);
       setInstallProgress(null);
@@ -289,86 +291,106 @@ function App() {
 
   return (
     <div className="container">
-      <h1>RemoteTouch</h1>
+      {/* Language Selector */}
+      <div className="language-selector">
+        <button
+          className="language-button"
+          onClick={() => setShowLanguageMenu(!showLanguageMenu)}
+        >
+          {languages[language].flag} {languages[language].name}
+        </button>
+        {showLanguageMenu && (
+          <div className="language-menu">
+            {(Object.keys(languages) as AppLanguage[]).map((lang) => (
+              <button
+                key={lang}
+                className={`language-option ${lang === language ? 'active' : ''}`}
+                onClick={() => handleLanguageChange(lang)}
+              >
+                {languages[lang].flag} {languages[lang].name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
-      {/* 接続確認ダイアログ / Connection Dialog */}
+      <h1>{t.appName}</h1>
+
+      {/* Connection Request Dialog */}
       {pendingRequest && (
         <div className="connection-dialog-overlay">
           <div className="connection-dialog">
             <div className="dialog-icon">📱</div>
-            <h3>Connection Request</h3>
+            <h3>{t.connectionRequest}</h3>
             <p className="device-name">{pendingRequest.device_name}</p>
             <p className="device-ip">IP: {pendingRequest.ip_address}</p>
-            <p className="dialog-message">Allow connection from this device?</p>
+            <p className="dialog-message">{t.allowConnection}</p>
             <div className="dialog-buttons">
               <button
                 className="approve-button"
                 onClick={() => handleConnectionResponse(true)}
               >
-                ✓ Allow
+                ✓ {t.allow}
               </button>
               <button
                 className="deny-button"
                 onClick={() => handleConnectionResponse(false)}
               >
-                ✕ Deny
+                ✕ {t.deny}
               </button>
             </div>
-            <p className="dialog-timeout">Auto-denied after 30 seconds</p>
+            <p className="dialog-timeout">{t.autodenied}</p>
           </div>
         </div>
       )}
 
-      {/* アップデート通知 / Update Notification */}
+      {/* Update Notification */}
       {updateAvailable && (
         <div className="update-banner">
           <div className="update-content">
             <span className="update-icon">🎉</span>
             <span className="update-text">
-              New version v{updateAvailable.version} available!
+              {t.updateAvailable} v{updateAvailable.version}
             </span>
           </div>
           {updateDownloading ? (
             <div className="update-progress">
               <div className="spinner small"></div>
-              <span>Updating...</span>
+              <span>{t.updating}</span>
             </div>
           ) : (
             <div className="update-buttons">
               <button className="update-button" onClick={handleUpdate}>
-                Update Now
+                {t.updateNow}
               </button>
               <button className="update-dismiss" onClick={() => setUpdateAvailable(null)}>
-                Later
+                {t.later}
               </button>
             </div>
           )}
         </div>
       )}
 
-      {/* アクセシビリティ権限の警告 / Accessibility Permission Warning */}
+      {/* Accessibility Permission Warning */}
       {!checkingPermission && accessibilityGranted === false && (
         <div className="permission-warning">
           <div className="warning-icon">⚠️</div>
-          <h3>Accessibility Permission Required</h3>
-          <p>
-            Keyboard and mouse control requires accessibility permission.
-            Please enable it in System Settings.
-          </p>
+          <h3>{t.accessibilityRequired}</h3>
+          <p>{t.accessibilityDescription}</p>
           <div className="permission-buttons">
             <button className="primary-button" onClick={handleOpenSettings}>
-              Open System Settings
+              {t.openSystemSettings}
             </button>
             <button className="secondary-button" onClick={handleRetryPermission}>
-              Recheck
+              {t.recheck}
             </button>
           </div>
           <div className="permission-steps">
-            <p><strong>Steps:</strong></p>
+            <p><strong>{t.permissionSteps}</strong></p>
             <ol>
-              <li>System Settings → Privacy & Security</li>
-              <li>Select "Accessibility"</li>
-              <li>Enable "RemoteTouch" or "Terminal"</li>
+              <li>{t.step1}</li>
+              <li>{t.step2}</li>
+              <li>{t.step3}</li>
             </ol>
           </div>
         </div>
@@ -376,58 +398,58 @@ function App() {
 
       <div className="status-card">
         <div className={`status-indicator ${connected ? "connected" : "waiting"}`} />
-        <span>{connected ? `Connected: ${connectedDevice}` : "Waiting for connection..."}</span>
+        <span>{connected ? `${t.connected}: ${connectedDevice}` : t.waitingForConnection}</span>
         {accessibilityGranted && (
-          <span className="permission-badge granted">✓ Permission OK</span>
+          <span className="permission-badge granted">✓ {t.permissionOK}</span>
         )}
       </div>
 
       {connectionInfo && (
         <div className="qr-section">
-          <h2>Scan QR Code to Connect</h2>
+          <h2>{t.scanQRCode}</h2>
 
-          {/* ローカル/外部切り替えタブ / Local/External Tabs */}
+          {/* Local/External Tabs */}
           <div className="connection-tabs">
             <button
               className={`tab-button ${!showExternalQR ? 'active' : ''}`}
               onClick={() => setShowExternalQR(false)}
             >
-              🏠 Local
+              🏠 {t.local}
             </button>
             <button
               className={`tab-button ${showExternalQR ? 'active' : ''}`}
               onClick={() => setShowExternalQR(true)}
             >
-              🌐 External
+              🌐 {t.external}
             </button>
           </div>
 
-          {/* ローカル接続QR / Local Connection QR */}
+          {/* Local Connection QR */}
           {!showExternalQR && (
             <>
               <div className="qr-placeholder" id="qr-code">
                 <img src={`data:image/png;base64,${connectionInfo.qr_code}`} alt="QR Code" />
               </div>
-              <p className="connection-note">Connect within same WiFi/network</p>
+              <p className="connection-note">{t.connectWithinSameNetwork}</p>
               <div className="manual-connection-info">
-                <p className="manual-title">Manual Connection:</p>
+                <p className="manual-title">{t.manualConnection}</p>
                 <div className="manual-field">
-                  <span className="field-label">IP Address:</span>
+                  <span className="field-label">{t.ipAddress}:</span>
                   <code className="field-value">{connectionInfo.ip}</code>
                 </div>
                 <div className="manual-field">
-                  <span className="field-label">Port:</span>
+                  <span className="field-label">{t.port}:</span>
                   <code className="field-value">{connectionInfo.port}</code>
                 </div>
                 <div className="manual-field">
-                  <span className="field-label">Token:</span>
+                  <span className="field-label">{t.token}:</span>
                   <code className="field-value token">{connectionInfo.auth_token}</code>
                 </div>
               </div>
             </>
           )}
 
-          {/* 外部接続QR / External Connection QR */}
+          {/* External Connection QR */}
           {showExternalQR && (
             <>
               {tunnelInfo ? (
@@ -435,30 +457,30 @@ function App() {
                   <div className="qr-placeholder" id="qr-code">
                     <img src={`data:image/png;base64,${tunnelInfo.qr_code}`} alt="External QR Code" />
                   </div>
-                  <p className="connection-note">Connect via internet</p>
+                  <p className="connection-note">{t.connectViaInternet}</p>
                   <div className="manual-connection-info">
-                    <p className="manual-title">Manual Connection:</p>
+                    <p className="manual-title">{t.manualConnection}</p>
                     <div className="manual-field">
-                      <span className="field-label">URL:</span>
+                      <span className="field-label">{t.url}:</span>
                       <code className="field-value url">{tunnelInfo.url.replace('https://', '')}</code>
                     </div>
                     <div className="manual-field">
-                      <span className="field-label">Port:</span>
+                      <span className="field-label">{t.port}:</span>
                       <code className="field-value">443</code>
                     </div>
                     <div className="manual-field">
-                      <span className="field-label">Token:</span>
+                      <span className="field-label">{t.token}:</span>
                       <code className="field-value token">{connectionInfo.auth_token}</code>
                     </div>
                   </div>
                   <button className="stop-tunnel-button" onClick={handleStopTunnel}>
-                    Stop Tunnel
+                    {t.stopTunnel}
                   </button>
                 </>
               ) : tunnelStarting ? (
                 <div className="tunnel-loading">
                   <div className="spinner"></div>
-                  <p>Starting tunnel...</p>
+                  <p>{t.startingTunnel}</p>
                 </div>
               ) : (
                 <div className="tunnel-setup">
@@ -466,24 +488,24 @@ function App() {
                     installing ? (
                       <div className="install-progress">
                         <div className="spinner"></div>
-                        <p>{installProgress || "Installing..."}</p>
+                        <p>{installProgress || t.installing}</p>
                       </div>
                     ) : (
                       <>
-                        <p className="warning-text">cloudflared is not installed</p>
+                        <p className="warning-text">{t.cloudflaredNotInstalled}</p>
                         <button className="start-tunnel-button" onClick={handleInstallCloudflared}>
-                          📥 Auto Install
+                          📥 {t.autoInstall}
                         </button>
                         <p className="install-guide">
-                          Or manual: <code>brew install cloudflared</code>
+                          {t.manualInstallHint} <code>brew install cloudflared</code>
                         </p>
                       </>
                     )
                   ) : (
                     <>
-                      <p>Enable connection from external network</p>
+                      <p>{t.enableExternalConnection}</p>
                       <button className="start-tunnel-button" onClick={handleStartTunnel}>
-                        🚀 Start Tunnel
+                        🚀 {t.startTunnel}
                       </button>
                     </>
                   )}
@@ -494,18 +516,18 @@ function App() {
         </div>
       )}
 
-      {/* 接続中の端末 / Connected Devices */}
+      {/* Connected Devices */}
       <div className="connected-devices-section">
-        <h2>Connected Devices</h2>
+        <h2>{t.connectedDevices}</h2>
         <div className="device-list">
           {connected && connectedDevice ? (
             <div className="device-item connected">
               <span className="device-icon">📱</span>
               <span className="device-name">{connectedDevice}</span>
-              <span className="device-status">● Connected</span>
+              <span className="device-status">● {t.connected}</span>
             </div>
           ) : (
-            <p className="empty-message">No devices connected. Scan QR code with mobile app.</p>
+            <p className="empty-message">{t.noDevicesConnected}</p>
           )}
         </div>
       </div>
