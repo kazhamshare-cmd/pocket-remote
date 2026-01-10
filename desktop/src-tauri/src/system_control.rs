@@ -2385,6 +2385,12 @@ impl SystemController {
         false
     }
 
+    #[cfg(not(target_os = "macos"))]
+    pub fn move_window_to_top_left_for_app(_app_name: Option<&str>, _width: Option<i32>, _height: Option<i32>) -> bool {
+        // Windows/Linux版は未実装
+        false
+    }
+
     /// ウィンドウを最大化（フルスクリーンではなく画面いっぱいに）- macOS版
     #[cfg(target_os = "macos")]
     pub fn maximize_window() -> bool {
