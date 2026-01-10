@@ -282,9 +282,10 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
   }
 
   Widget _buildLanguageSwitcher(WidgetRef ref, AppLanguage language) {
+    final l10n = ref.watch(l10nProvider);
     return GestureDetector(
       onTap: () {
-        ref.read(languageProvider.notifier).toggleLanguage();
+        ref.read(languageProvider.notifier).nextLanguage();
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -297,12 +298,12 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              language == AppLanguage.ja ? '🇯🇵' : '🇺🇸',
+              l10n.languageFlag,
               style: const TextStyle(fontSize: 16),
             ),
             const SizedBox(width: 6),
             Text(
-              language == AppLanguage.ja ? '日本語' : 'English',
+              l10n.languageName,
               style: const TextStyle(
                 color: Colors.white70,
                 fontSize: 12,

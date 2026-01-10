@@ -128,7 +128,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
             print('[ScanScreen] Disconnected (after ${elapsed}ms)');
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text('${l10n.connectionFailed}: 接続が切断されました'),
+                content: Text('${l10n.connectionFailed}: ${l10n.connectionDisconnected}'),
                 duration: const Duration(seconds: 3),
               ),
             );
@@ -140,7 +140,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
       // タイムアウト
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${l10n.connectionFailed}: タイムアウト')),
+          SnackBar(content: Text('${l10n.connectionFailed}: ${l10n.timeout}')),
         );
         _restartCameraAfterFailure();
       }
@@ -169,13 +169,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
     print('[ScanScreen] build called - _cameraError: $_cameraError');
     return Scaffold(
       appBar: AppBar(
-        title: const Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('QRコードをスキャン', style: TextStyle(fontSize: 16)),
-            Text('Scan QR Code', style: TextStyle(fontSize: 12, color: Colors.white70)),
-          ],
-        ),
+        title: Text(l10n.scanQRCode, style: const TextStyle(fontSize: 16)),
         backgroundColor: const Color(0xFF1a1a2e),
         foregroundColor: Colors.white,
         actions: [
@@ -197,16 +191,16 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                   children: [
                     const Icon(Icons.videocam_off, color: Colors.white54, size: 64),
                     const SizedBox(height: 16),
-                    const Text(
-                      'カメラ許可が必要です\nCamera permission required',
-                      style: TextStyle(color: Colors.white54, fontSize: 16),
+                    Text(
+                      l10n.cameraPermissionRequiredTitle,
+                      style: const TextStyle(color: Colors.white54, fontSize: 16),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 24),
                     ElevatedButton.icon(
                       onPressed: _retryCamera,
                       icon: const Icon(Icons.refresh),
-                      label: const Text('再試行 / Retry'),
+                      label: Text(l10n.retryBtn),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFe94560),
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
@@ -266,8 +260,8 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
             right: 20,
             child: Text(
               _cameraError
-                  ? '手動接続を使用\nUse manual connection'
-                  : 'PCのQRコードをスキャン\nScan QR code on your PC',
+                  ? l10n.useManualConnection
+                  : l10n.scanPCQRCode,
               textAlign: TextAlign.center,
               style: const TextStyle(
                 color: Colors.white,
@@ -292,7 +286,7 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
                 backgroundColor: const Color(0xFFe94560),
                 padding: const EdgeInsets.symmetric(vertical: 16),
               ),
-              child: const Text('手動接続 / Manual Connection'),
+              child: Text(l10n.manualConnection),
             ),
           ),
         ],
@@ -500,15 +494,10 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
         title: Text(l10n.termsOfUse, style: const TextStyle(color: Colors.white)),
-        content: const SingleChildScrollView(
+        content: SingleChildScrollView(
           child: Text(
-            'RemoteTouch Monthly Subscription\n\n'
-            '- Payment will be charged to your Apple ID account at confirmation of purchase.\n'
-            '- Subscription automatically renews unless canceled at least 24 hours before the end of the current period.\n'
-            '- Your account will be charged for renewal within 24 hours prior to the end of the current period.\n'
-            '- You can manage and cancel your subscriptions by going to your account settings on the App Store after purchase.\n'
-            '- Any unused portion of a free trial period will be forfeited when you purchase a subscription.',
-            style: TextStyle(color: Colors.white70),
+            l10n.termsContent,
+            style: const TextStyle(color: Colors.white70),
           ),
         ),
         actions: [
@@ -528,16 +517,10 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
         title: Text(l10n.privacyPolicy, style: const TextStyle(color: Colors.white)),
-        content: const SingleChildScrollView(
+        content: SingleChildScrollView(
           child: Text(
-            'RemoteTouch Privacy Policy\n\n'
-            'We respect your privacy. RemoteTouch:\n\n'
-            '- Does not collect personal data\n'
-            '- Does not share your information with third parties\n'
-            '- Only communicates directly with your desktop app\n'
-            '- Uses secure encrypted connections\n\n'
-            'For questions, please contact us through our inquiry form.',
-            style: TextStyle(color: Colors.white70),
+            l10n.privacyContent,
+            style: const TextStyle(color: Colors.white70),
           ),
         ),
         actions: [

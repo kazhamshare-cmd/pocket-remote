@@ -101,90 +101,51 @@ class _CommandsScreenState extends ConsumerState<CommandsScreen> {
                 style: const TextStyle(color: Colors.white70, fontSize: 14),
               ),
               const SizedBox(height: 12),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  // 日本語
-                  GestureDetector(
-                    onTap: () {
-                      ref.read(languageProvider.notifier).setLanguage(AppLanguage.ja);
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: language == AppLanguage.ja
-                            ? const Color(0xFFe94560)
-                            : const Color(0xFF16213e),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: language == AppLanguage.ja
+                  for (final lang in AppLanguage.values)
+                    GestureDetector(
+                      onTap: () {
+                        ref.read(languageProvider.notifier).setLanguage(lang);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: language == lang
                               ? const Color(0xFFe94560)
-                              : Colors.white24,
-                          width: 2,
+                              : const Color(0xFF16213e),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: language == lang
+                                ? const Color(0xFFe94560)
+                                : Colors.white24,
+                            width: 2,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(_languageFlag(lang), style: const TextStyle(fontSize: 20)),
+                            const SizedBox(width: 6),
+                            Text(
+                              _languageName(lang),
+                              style: TextStyle(
+                                color: language == lang
+                                    ? Colors.white
+                                    : Colors.white70,
+                                fontSize: 14,
+                                fontWeight: language == lang
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text('🇯🇵', style: TextStyle(fontSize: 24)),
-                          const SizedBox(width: 8),
-                          Text(
-                            '日本語',
-                            style: TextStyle(
-                              color: language == AppLanguage.ja
-                                  ? Colors.white
-                                  : Colors.white70,
-                              fontSize: 16,
-                              fontWeight: language == AppLanguage.ja
-                                  ? FontWeight.bold
-                                  : FontWeight.normal,
-                            ),
-                          ),
-                        ],
-                      ),
                     ),
-                  ),
-                  const SizedBox(width: 16),
-                  // English
-                  GestureDetector(
-                    onTap: () {
-                      ref.read(languageProvider.notifier).setLanguage(AppLanguage.en);
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: language == AppLanguage.en
-                            ? const Color(0xFFe94560)
-                            : const Color(0xFF16213e),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: language == AppLanguage.en
-                              ? const Color(0xFFe94560)
-                              : Colors.white24,
-                          width: 2,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text('🇺🇸', style: TextStyle(fontSize: 24)),
-                          const SizedBox(width: 8),
-                          Text(
-                            'English',
-                            style: TextStyle(
-                              color: language == AppLanguage.en
-                                  ? Colors.white
-                                  : Colors.white70,
-                              fontSize: 16,
-                              fontWeight: language == AppLanguage.en
-                                  ? FontWeight.bold
-                                  : FontWeight.normal,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                 ],
               ),
               const SizedBox(height: 40),
@@ -227,5 +188,25 @@ class _CommandsScreenState extends ConsumerState<CommandsScreen> {
         ),
       ),
     );
+  }
+
+  String _languageFlag(AppLanguage lang) {
+    switch (lang) {
+      case AppLanguage.ja: return '🇯🇵';
+      case AppLanguage.en: return '🇺🇸';
+      case AppLanguage.zh: return '🇨🇳';
+      case AppLanguage.ko: return '🇰🇷';
+      case AppLanguage.de: return '🇩🇪';
+    }
+  }
+
+  String _languageName(AppLanguage lang) {
+    switch (lang) {
+      case AppLanguage.ja: return '日本語';
+      case AppLanguage.en: return 'English';
+      case AppLanguage.zh: return '中文';
+      case AppLanguage.ko: return '한국어';
+      case AppLanguage.de: return 'Deutsch';
+    }
   }
 }

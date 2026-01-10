@@ -120,6 +120,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
   // ショートカット追加ダイアログ
   void _showAddShortcutDialog() {
+    final l10n = ref.read(l10nProvider);
     final labelController = TextEditingController();
     final commandController = TextEditingController();
 
@@ -127,7 +128,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
-        title: const Text('ショートカット追加', style: TextStyle(color: Colors.white)),
+        title: Text(l10n.addShortcut, style: const TextStyle(color: Colors.white)),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -136,28 +137,28 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
               TextField(
                 controller: labelController,
                 style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'ボタン名',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  hintText: '例: 履歴検索',
-                  hintStyle: TextStyle(color: Colors.white38),
+                decoration: InputDecoration(
+                  labelText: l10n.buttonName,
+                  labelStyle: const TextStyle(color: Colors.white70),
+                  hintText: l10n.buttonNameHint,
+                  hintStyle: const TextStyle(color: Colors.white38),
                 ),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: commandController,
                 style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'コマンド / キー',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  hintText: '例: ctrl+r',
-                  hintStyle: TextStyle(color: Colors.white38),
+                decoration: InputDecoration(
+                  labelText: l10n.commandOrKey,
+                  labelStyle: const TextStyle(color: Colors.white70),
+                  hintText: l10n.commandOrKeyHint,
+                  hintStyle: const TextStyle(color: Colors.white38),
                 ),
               ),
               const SizedBox(height: 16),
-              const Text(
-                '入力形式:',
-                style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
+              Text(
+                l10n.inputFormat,
+                style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 4),
               Container(
@@ -166,16 +167,16 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                   color: Colors.black26,
                   borderRadius: BorderRadius.circular(4),
                 ),
-                child: const Column(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('• 文字列: yes, /help, git status', style: TextStyle(color: Colors.white60, fontSize: 11)),
-                    SizedBox(height: 2),
-                    Text('• 単一キー: tab, escape, enter, up, down', style: TextStyle(color: Colors.white60, fontSize: 11)),
-                    SizedBox(height: 2),
-                    Text('• 修飾キー: ctrl+c, cmd+s, alt+f4', style: TextStyle(color: Colors.white60, fontSize: 11)),
-                    SizedBox(height: 2),
-                    Text('• 複合: ctrl+shift+r, cmd+shift+p', style: TextStyle(color: Colors.white60, fontSize: 11)),
+                    Text('• ${l10n.formatString}', style: const TextStyle(color: Colors.white60, fontSize: 11)),
+                    const SizedBox(height: 2),
+                    Text('• ${l10n.formatSingleKey}', style: const TextStyle(color: Colors.white60, fontSize: 11)),
+                    const SizedBox(height: 2),
+                    Text('• ${l10n.formatModifier}', style: const TextStyle(color: Colors.white60, fontSize: 11)),
+                    const SizedBox(height: 2),
+                    Text('• ${l10n.formatCombo}', style: const TextStyle(color: Colors.white60, fontSize: 11)),
                   ],
                 ),
               ),
@@ -185,7 +186,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('キャンセル'),
+            child: Text(l10n.cancel),
           ),
           TextButton(
             onPressed: () {
@@ -200,7 +201,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
                 Navigator.pop(context);
               }
             },
-            child: const Text('追加'),
+            child: Text(l10n.add),
           ),
         ],
       ),
@@ -209,19 +210,20 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
   // ショートカット削除確認
   void _showDeleteShortcutDialog(int index) {
+    final l10n = ref.read(l10nProvider);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
-        title: const Text('ショートカット削除', style: TextStyle(color: Colors.white)),
+        title: Text(l10n.deleteBtn, style: const TextStyle(color: Colors.white)),
         content: Text(
-          '「${_customShortcuts[index]['label']}」を削除しますか？',
+          '${_customShortcuts[index]['label']} - ${l10n.deleteShortcutConfirm}',
           style: const TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('キャンセル'),
+            child: Text(l10n.cancel),
           ),
           TextButton(
             onPressed: () {
@@ -231,7 +233,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
               _saveCustomShortcuts();
               Navigator.pop(context);
             },
-            child: const Text('削除', style: TextStyle(color: Colors.red)),
+            child: Text(l10n.deleteBtn, style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -240,6 +242,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
 
   // ショートカット管理ダイアログ（並べ替え・削除）
   void _showManageShortcutsDialog() {
+    final l10n = ref.read(l10nProvider);
     showDialog(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -248,25 +251,25 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
           title: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('ショートカット管理', style: TextStyle(color: Colors.white)),
+              Text(l10n.reorderShortcuts, style: const TextStyle(color: Colors.white)),
               IconButton(
                 onPressed: () {
                   Navigator.pop(dialogContext);
                   _showAddShortcutDialog();
                 },
                 icon: const Icon(Icons.add, color: Colors.cyan),
-                tooltip: '追加',
+                tooltip: l10n.add,
               ),
             ],
           ),
           content: SizedBox(
             width: double.maxFinite,
             child: _customShortcuts.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.all(16),
+                ? Padding(
+                    padding: const EdgeInsets.all(16),
                     child: Text(
-                      'ショートカットがありません\n右上の＋で追加してください',
-                      style: TextStyle(color: Colors.white54),
+                      l10n.noCommands,
+                      style: const TextStyle(color: Colors.white54),
                       textAlign: TextAlign.center,
                     ),
                   )
@@ -364,7 +367,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('閉じる'),
+              child: Text(l10n.close),
             ),
           ],
         ),
@@ -2850,24 +2853,25 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _showSpotlightDialog() {
+    final l10n = ref.read(l10nProvider);
     final controller = TextEditingController();
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
-        title: const Text('Spotlight検索', style: TextStyle(color: Colors.white)),
+        title: Text(l10n.spotlightSearch, style: const TextStyle(color: Colors.white)),
         content: TextField(
           controller: controller,
           autofocus: true,
           style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            hintText: 'アプリ名やファイル名...',
-            hintStyle: TextStyle(color: Colors.white38),
-            prefixIcon: Icon(Icons.search, color: Colors.white54),
-            enabledBorder: OutlineInputBorder(
+          decoration: InputDecoration(
+            hintText: l10n.searchHint,
+            hintStyle: const TextStyle(color: Colors.white38),
+            prefixIcon: const Icon(Icons.search, color: Colors.white54),
+            enabledBorder: const OutlineInputBorder(
               borderSide: BorderSide(color: Colors.white24),
             ),
-            focusedBorder: OutlineInputBorder(
+            focusedBorder: const OutlineInputBorder(
               borderSide: BorderSide(color: Color(0xFFe94560)),
             ),
           ),
@@ -2881,7 +2885,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('キャンセル', style: TextStyle(color: Colors.white54)),
+            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
             onPressed: () {
@@ -2893,7 +2897,7 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFe94560),
             ),
-            child: const Text('検索'),
+            child: Text(l10n.search),
           ),
         ],
       ),
@@ -3219,30 +3223,31 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   }
 
   void _showQuitAppDialog(String appName) {
+    final l10n = ref.read(l10nProvider);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16213e),
-        title: const Text('アプリを終了', style: TextStyle(color: Colors.white)),
+        title: Text(l10n.quitApp, style: const TextStyle(color: Colors.white)),
         content: Text(
-          '$appName を終了しますか？',
+          l10n.quitAppConfirm(appName),
           style: const TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('キャンセル', style: TextStyle(color: Colors.white54)),
+            child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
           ),
           ElevatedButton(
             onPressed: () {
               ref.read(webSocketProvider.notifier).quitApp(appName);
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('$appName を終了しました')),
+                SnackBar(content: Text(l10n.appQuit(appName))),
               );
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('終了'),
+            child: Text(l10n.quit),
           ),
         ],
       ),
