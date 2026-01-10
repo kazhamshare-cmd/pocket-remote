@@ -1513,10 +1513,30 @@ fn get_tunnel_info(state: tauri::State<Arc<AppState>>) -> Option<TunnelInfo> {
     state.tunnel_info.read().clone()
 }
 
+// Helper function to kill all cloudflared processes
+fn kill_all_cloudflared() {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "cloudflared"])
+            .spawn();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "cloudflared.exe"])
+            .spawn();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = Arc::new(AppState::new());
     let state_clone = state.clone();
+    let state_for_exit = state.clone();
+
+    // Kill any existing cloudflared processes on startup
+    kill_all_cloudflared();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1550,6 +1570,27 @@ pub fn run() {
             });
 
             Ok(())
+        })
+        .on_window_event(move |_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                // Kill cloudflared when app window is destroyed
+                if let Some(pid) = state_for_exit.tunnel_process.write().take() {
+                    #[cfg(unix)]
+                    {
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &pid.to_string()])
+                            .spawn();
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/PID", &pid.to_string()])
+                            .spawn();
+                    }
+                }
+                // Also kill any orphaned cloudflared processes
+                kill_all_cloudflared();
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
