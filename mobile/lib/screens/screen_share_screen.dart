@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/websocket_service.dart';
 import '../services/localization_service.dart';
+import '../services/command_safety_service.dart';
 
 /// ANSIエスケープシーケンスを除去する正規表現
 final _ansiRegex = RegExp(
@@ -116,6 +117,98 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
   Future<void> _saveCustomShortcuts() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('custom_shortcuts', jsonEncode(_customShortcuts));
+  }
+
+  /// コマンドを安全に実行（危険なコマンドは確認ダイアログを表示）
+  Future<void> _executeCommandSafely(String command, {bool addEnter = true}) async {
+    final safetyState = ref.read(commandSafetyProvider);
+    final l10n = ref.read(l10nProvider);
+
+    // コマンド履歴に追加
+    ref.read(commandSafetyProvider.notifier).addToHistory(command);
+
+    // セーフモードがオンで危険なコマンドの場合、確認ダイアログを表示
+    if (safetyState.safeModeEnabled && isDangerousCommand(command)) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF16213e),
+          title: Row(
+            children: [
+              const Icon(Icons.warning_amber, color: Colors.orange, size: 28),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  l10n.dangerousCommandWarning,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                l10n.dangerousCommandMessage,
+                style: const TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                l10n.commandToExecute,
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.red.withOpacity(0.5)),
+                ),
+                child: Text(
+                  command,
+                  style: const TextStyle(
+                    color: Colors.red,
+                    fontFamily: 'monospace',
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                getDangerReason(command),
+                style: const TextStyle(color: Colors.orange, fontSize: 12),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(l10n.cancel, style: const TextStyle(color: Colors.white54)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+              ),
+              child: Text(l10n.execute),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) {
+        return; // キャンセルされた
+      }
+    }
+
+    // コマンドを実行
+    if (addEnter) {
+      ref.read(webSocketProvider.notifier).typeTextAndEnter(command);
+    } else {
+      ref.read(webSocketProvider.notifier).typeText(command);
+    }
   }
 
   // ショートカット追加ダイアログ
@@ -1901,10 +1994,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: GestureDetector(
-        onTap: () {
-          // コマンドを入力してEnterを送信
-          ref.read(webSocketProvider.notifier).typeText(command);
-          ref.read(webSocketProvider.notifier).pressKey('enter');
+        onTap: () async {
+          // 安全にコマンドを実行
+          await _executeCommandSafely(command, addEnter: true);
         },
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1957,9 +2049,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: GestureDetector(
-        onTap: () {
-          // 既存ウィンドウにコマンド+Enterを送信
-          ref.read(webSocketProvider.notifier).typeTextAndEnter(command);
+        onTap: () async {
+          // 安全にコマンドを実行
+          await _executeCommandSafely(command, addEnter: true);
           // 少し待ってから内容を更新
           Future.delayed(const Duration(milliseconds: 500), () {
             _refreshTerminalContent();
@@ -1986,8 +2078,9 @@ class _ScreenShareScreenState extends ConsumerState<ScreenShareScreen> {
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: GestureDetector(
-        onTap: () {
-          ref.read(webSocketProvider.notifier).typeTextAndEnter(command);
+        onTap: () async {
+          // 安全にコマンドを実行
+          await _executeCommandSafely(command, addEnter: true);
           HapticFeedback.lightImpact();
           Future.delayed(const Duration(milliseconds: 500), () {
             _refreshTerminalContent();

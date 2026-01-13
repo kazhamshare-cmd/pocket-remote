@@ -1209,6 +1209,87 @@ class L10n {
     AppLanguage.ko: '완료',
     AppLanguage.de: 'Fertig',
   });
+
+  // ===== Command Safety =====
+  String get dangerousCommandWarning => _t({
+    AppLanguage.ja: '危険なコマンド',
+    AppLanguage.en: 'Dangerous Command',
+    AppLanguage.zh: '危险命令',
+    AppLanguage.ko: '위험한 명령',
+    AppLanguage.de: 'Gefährlicher Befehl',
+  });
+
+  String get dangerousCommandMessage => _t({
+    AppLanguage.ja: 'このコマンドはシステムに重大な影響を与える可能性があります。実行しますか？',
+    AppLanguage.en: 'This command may have serious effects on your system. Do you want to execute it?',
+    AppLanguage.zh: '此命令可能对您的系统产生严重影响。您要执行它吗？',
+    AppLanguage.ko: '이 명령은 시스템에 심각한 영향을 미칠 수 있습니다. 실행하시겠습니까?',
+    AppLanguage.de: 'Dieser Befehl kann schwerwiegende Auswirkungen auf Ihr System haben. Möchten Sie ihn ausführen?',
+  });
+
+  String get commandToExecute => _t({
+    AppLanguage.ja: '実行するコマンド:',
+    AppLanguage.en: 'Command to execute:',
+    AppLanguage.zh: '要执行的命令:',
+    AppLanguage.ko: '실행할 명령:',
+    AppLanguage.de: 'Auszuführender Befehl:',
+  });
+
+  String get execute => _t({
+    AppLanguage.ja: '実行',
+    AppLanguage.en: 'Execute',
+    AppLanguage.zh: '执行',
+    AppLanguage.ko: '실행',
+    AppLanguage.de: 'Ausführen',
+  });
+
+  String get safeMode => _t({
+    AppLanguage.ja: 'セーフモード',
+    AppLanguage.en: 'Safe Mode',
+    AppLanguage.zh: '安全模式',
+    AppLanguage.ko: '안전 모드',
+    AppLanguage.de: 'Sicherer Modus',
+  });
+
+  String get safeModeDesc => _t({
+    AppLanguage.ja: '危険なコマンド実行前に確認ダイアログを表示',
+    AppLanguage.en: 'Show confirmation dialog before executing dangerous commands',
+    AppLanguage.zh: '执行危险命令前显示确认对话框',
+    AppLanguage.ko: '위험한 명령 실행 전 확인 대화상자 표시',
+    AppLanguage.de: 'Bestätigungsdialog vor Ausführung gefährlicher Befehle anzeigen',
+  });
+
+  String get commandHistory => _t({
+    AppLanguage.ja: 'コマンド履歴',
+    AppLanguage.en: 'Command History',
+    AppLanguage.zh: '命令历史',
+    AppLanguage.ko: '명령 기록',
+    AppLanguage.de: 'Befehlsverlauf',
+  });
+
+  String get clearHistory => _t({
+    AppLanguage.ja: '履歴をクリア',
+    AppLanguage.en: 'Clear History',
+    AppLanguage.zh: '清除历史',
+    AppLanguage.ko: '기록 지우기',
+    AppLanguage.de: 'Verlauf löschen',
+  });
+
+  String get noHistory => _t({
+    AppLanguage.ja: '履歴がありません',
+    AppLanguage.en: 'No history',
+    AppLanguage.zh: '没有历史记录',
+    AppLanguage.ko: '기록 없음',
+    AppLanguage.de: 'Kein Verlauf',
+  });
+
+  String get blockedBySafeMode => _t({
+    AppLanguage.ja: 'セーフモードによりブロックされました',
+    AppLanguage.en: 'Blocked by Safe Mode',
+    AppLanguage.zh: '被安全模式阻止',
+    AppLanguage.ko: '안전 모드에 의해 차단됨',
+    AppLanguage.de: 'Durch Sicheren Modus blockiert',
+  });
 }
 
 // ローカライズ文字列を取得するためのProvider
